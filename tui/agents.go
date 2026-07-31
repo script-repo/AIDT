@@ -1,0 +1,525 @@
+package main
+
+import (
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"os/exec"
+	"sort"
+	"strings"
+	"sync"
+
+	tea "github.com/charmbracelet/bubbletea"
+)
+
+// agentDef describes a terminal AI agent CLI the TUI can launch (and optionally
+// deploy) over SSH on one of the managed hosts.
+type agentDef struct {
+	name       string
+	cli        string // command to (re)launch an existing install
+	deployable bool   // whether the TUI can install it
+	container  bool   // runs as Docker container(s) on the host (multi-instance)
+	target     string // "gateway" or "worker"
+	endpoint   string // how it reaches models (informational)
+	desc       string
+}
+
+// depsBootstrap installs the prerequisites the npm/Node agents need on
+// Rocky/RHEL and Ubuntu/Debian and makes `npm -g` usable as a non-root user:
+//   - curl + git (Hermes/OpenClaw installers require them)
+//   - Node.js 22 via NodeSource (these are Node tools)
+//   - a user-writable npm global prefix (~/.npm-global), because NodeSource sets
+//     the prefix to /usr, which makes `npm install -g openclaw` fail with EACCES
+//     for a normal user. We also put /usr/local/bin + ~/.local/bin + npm bin on
+//     PATH (non-login SSH often misses them → exit 127).
+const depsBootstrap = `echo "[deploy] ensuring curl, git, Node.js…"
+. /etc/os-release 2>/dev/null || true
+# Broad PATH first so later command -v finds ollama/hermes/openclaw where packages put them.
+export PATH="/usr/local/bin:/usr/bin:$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
+need_curl=0; need_git=0
+command -v curl >/dev/null 2>&1 || need_curl=1
+command -v git >/dev/null 2>&1 || need_git=1
+if [ "$need_curl$need_git" != "00" ]; then
+  case "${ID:-}" in
+    ubuntu|debian)
+      sudo apt-get update -y >/dev/null 2>&1 || true
+      pkgs=""
+      [ "$need_curl" = 1 ] && pkgs="$pkgs curl"
+      [ "$need_git" = 1 ] && pkgs="$pkgs git"
+      sudo DEBIAN_FRONTEND=noninteractive apt-get install -y $pkgs
+      ;;
+    *)
+      pkgs=""
+      [ "$need_curl" = 1 ] && pkgs="$pkgs curl"
+      [ "$need_git" = 1 ] && pkgs="$pkgs git"
+      sudo dnf install -y $pkgs 2>/dev/null || sudo yum install -y $pkgs
+      ;;
+  esac
+fi
+command -v curl >/dev/null 2>&1 || { echo "[deploy] ERROR: curl still missing" >&2; exit 1; }
+if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+  echo "[deploy] installing Node.js 22 + npm via NodeSource (sudo)…"
+  case "${ID:-}" in
+    ubuntu|debian)
+      curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+      sudo DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs
+      ;;
+    *)
+      curl -fsSL https://rpm.nodesource.com/setup_22.x | sudo -E bash -
+      sudo dnf install -y nodejs 2>/dev/null || sudo yum install -y nodejs
+      ;;
+  esac
+fi
+command -v npm >/dev/null 2>&1 || { echo "[deploy] ERROR: npm still missing after Node install" >&2; exit 1; }
+NPM_PREFIX="$HOME/.npm-global"
+mkdir -p "$NPM_PREFIX/bin" "$HOME/.local/bin"
+npm config set prefix "$NPM_PREFIX" >/dev/null 2>&1 || true
+export PATH="/usr/local/bin:$HOME/.local/bin:$NPM_PREFIX/bin:$PATH"
+hash -r 2>/dev/null || true
+grep -q '.npm-global/bin' "$HOME/.bashrc" 2>/dev/null || echo 'export PATH="$HOME/.npm-global/bin:$PATH"' >> "$HOME/.bashrc"
+grep -q '.local/bin' "$HOME/.bashrc" 2>/dev/null || echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
+grep -q '/usr/local/bin' "$HOME/.bashrc" 2>/dev/null || echo 'export PATH="/usr/local/bin:$PATH"' >> "$HOME/.bashrc"
+`
+
+// crushDeployScript installs crush from the Charm yum repo on the Olla server
+// and launches it (the Olla provider config is written separately).
+const crushDeployScript = `set -e
+if ! command -v crush >/dev/null 2>&1; then
+  echo "[deploy] adding Charm repo and installing crush (sudo)…"
+  sudo rpm --import https://repo.charm.sh/yum/gpg.key || true
+  printf '[charm]\nname=Charm\nbaseurl=https://repo.charm.sh/yum/\nenabled=1\ngpgcheck=1\ngpgkey=https://repo.charm.sh/yum/gpg.key\n' | sudo tee /etc/yum.repos.d/charm.repo >/dev/null
+  sudo dnf install -y crush
+fi
+echo "[deploy] crush: $(command -v crush)"
+echo "[deploy] launching crush (Olla provider preconfigured)…"
+crush
+`
+
+// agentCatalog is the set of agents offered in the Agents section.
+//
+//   - Crush runs on the Olla server and talks to the Olla OpenAI endpoint (so it
+//     load-balances across the whole worker pool). Installed from the Charm repo;
+//     its provider config is written to ~/.config/crush/crush.json.
+//   - OpenClaw and Hermes are deployed "by ollama" (ollama launch …) on a chosen
+//     worker, after git + Node + a user npm prefix are bootstrapped.
+//   - Nanoclaw runs as one or more Docker containers on a chosen worker (see
+//     nanoclaw.go), so multiple isolated instances can share the same VM.
+var agentCatalog = []agentDef{
+	{
+		name:       "Crush",
+		cli:        "crush",
+		deployable: true,
+		target:     "gateway",
+		endpoint:   "Olla OpenAI endpoint (whole pool)",
+		desc:       "Charm coding agent",
+	},
+	{
+		name:       "Hermes",
+		cli:        "hermes",
+		deployable: true,
+		target:     "worker",
+		endpoint:   "Olla OpenAI endpoint (whole pool)",
+		desc:       "Nous Research self-improving agent",
+	},
+}
+
+// hermesInstallFragment installs Hermes via the official Nous installer when
+// missing (--skip-setup so the wizard cannot hang a headless deploy). ollama
+// launch is a last-resort fallback. Fails closed if hermes is still missing
+// (avoids exit 127 from a later bare `hermes` call).
+const hermesInstallFragment = `export PATH="/usr/local/bin:$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
+hash -r 2>/dev/null || true
+if ! command -v hermes >/dev/null 2>&1; then
+  echo "[deploy] installing hermes (official installer, skip setup)…"
+  # --skip-setup: no interactive wizard. HERMES_NONINTERACTIVE is also set by caller.
+  curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- --skip-setup
+  export PATH="/usr/local/bin:$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
+  hash -r 2>/dev/null || true
+fi
+# Installer may put the wrapper in ~/.local/bin or /usr/local/bin without
+# refreshing this shell's hash table.
+if ! command -v hermes >/dev/null 2>&1; then
+  for c in "$HOME/.local/bin/hermes" /usr/local/bin/hermes "$HOME/.hermes/bin/hermes"; do
+    if [ -x "$c" ]; then export PATH="$(dirname "$c"):$PATH"; break; fi
+  done
+  hash -r 2>/dev/null || true
+fi
+if ! command -v hermes >/dev/null 2>&1 && command -v ollama >/dev/null 2>&1; then
+  echo "[deploy] hermes still missing; trying ollama launch hermes…"
+  ollama launch hermes --yes --model __HERMES_MODEL__ </dev/null || true
+  export PATH="/usr/local/bin:$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
+  hash -r 2>/dev/null || true
+fi
+if ! command -v hermes >/dev/null 2>&1; then
+  echo "[deploy] ERROR: hermes not found on PATH after install" >&2
+  echo "[deploy] tried: official installer --skip-setup, then ollama launch" >&2
+  echo "[deploy] PATH=$PATH" >&2
+  ls -la "$HOME/.local/bin" /usr/local/bin 2>/dev/null | head -40 >&2 || true
+  exit 1
+fi
+echo "[deploy] hermes: $(command -v hermes)"
+`
+
+// openclawInstallFragment installs OpenClaw via npm (user prefix) or the
+// official install.sh. Does NOT rely on `ollama launch` first — that fails with
+// exit 127 when ollama is missing/off-PATH on the worker.
+const openclawInstallFragment = `export PATH="/usr/local/bin:$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
+hash -r 2>/dev/null || true
+if ! command -v openclaw >/dev/null 2>&1; then
+  echo "[deploy] installing openclaw…"
+  if command -v npm >/dev/null 2>&1; then
+    echo "[deploy] npm install -g openclaw@latest (prefix $HOME/.npm-global)…"
+    npm install -g openclaw@latest
+  fi
+  export PATH="/usr/local/bin:$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
+  hash -r 2>/dev/null || true
+fi
+if ! command -v openclaw >/dev/null 2>&1; then
+  echo "[deploy] npm path missed; trying official install.sh…"
+  curl -fsSL https://openclaw.ai/install.sh | bash
+  export PATH="/usr/local/bin:$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
+  hash -r 2>/dev/null || true
+fi
+if ! command -v openclaw >/dev/null 2>&1; then
+  for c in "$HOME/.npm-global/bin/openclaw" "$HOME/.local/bin/openclaw" /usr/local/bin/openclaw; do
+    if [ -x "$c" ]; then export PATH="$(dirname "$c"):$PATH"; break; fi
+  done
+  hash -r 2>/dev/null || true
+fi
+if ! command -v openclaw >/dev/null 2>&1 && command -v ollama >/dev/null 2>&1; then
+  echo "[deploy] openclaw still missing; trying ollama launch openclaw…"
+  ollama launch openclaw --yes --model __OPENCLAW_MODEL__ </dev/null || true
+  export PATH="/usr/local/bin:$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
+  hash -r 2>/dev/null || true
+fi
+if ! command -v openclaw >/dev/null 2>&1; then
+  echo "[deploy] ERROR: openclaw not found on PATH after install" >&2
+  echo "[deploy] tried: npm -g, openclaw.ai/install.sh, ollama launch" >&2
+  echo "[deploy] PATH=$PATH" >&2
+  ls -la "$HOME/.npm-global/bin" "$HOME/.local/bin" 2>/dev/null | head -40 >&2 || true
+  exit 1
+fi
+echo "[deploy] openclaw: $(command -v openclaw)"
+`
+
+// agentDeployScript returns the install bootstrap for an agent. Crush uses the
+// Charm repo; Hermes/OpenClaw use official installers (not bare ollama launch).
+// Headless deploys exit 0 after install so the TUI can register the agent —
+// they do NOT exec the interactive CLI (that caused exit 127 when the binary
+// was missing/off-PATH and blocked registration).
+func (m *model) agentDeployScript(a agentDef) string {
+	if a.name == "Crush" {
+		return crushDeployScript
+	}
+	model := m.effDefaultModel()
+	gateway := a.name == "Hermes" && m.hermesGatewayWanted()
+
+	var b strings.Builder
+	b.WriteString("set -e\n")
+	b.WriteString(depsBootstrap)
+	if a.name == "Hermes" {
+		b.WriteString("export HERMES_NONINTERACTIVE=1\n")
+		b.WriteString(strings.ReplaceAll(hermesInstallFragment, "__HERMES_MODEL__", model))
+		b.WriteString(m.hermesOllaConfigScript(model))
+		if gateway {
+			b.WriteString(m.hermesGatewayScript())
+			b.WriteString("echo \"[deploy] Hermes gateway is ready (Telegram). You can close this window.\"\n")
+		} else {
+			b.WriteString("echo \"[deploy] Hermes installed and pointed at Olla. Open it from Agents (enter) to chat.\"\n")
+		}
+		return b.String()
+	}
+	if a.name == "OpenClaw" {
+		b.WriteString(strings.ReplaceAll(openclawInstallFragment, "__OPENCLAW_MODEL__", model))
+		b.WriteString("echo \"[deploy] OpenClaw installed. Open it from Agents (enter) to chat / onboard.\"\n")
+		return b.String()
+	}
+	// Generic fallback (should not hit for catalog agents).
+	b.WriteString(fmt.Sprintf("if ! command -v %s >/dev/null 2>&1; then\n", a.cli))
+	b.WriteString(fmt.Sprintf("  echo \"[deploy] installing %s…\"\n", a.cli))
+	b.WriteString(fmt.Sprintf("  if command -v ollama >/dev/null 2>&1; then ollama launch %s --yes --model %s </dev/null || true; fi\n", a.cli, model))
+	b.WriteString("fi\n")
+	b.WriteString(fmt.Sprintf("if ! command -v %s >/dev/null 2>&1; then\n", a.cli))
+	b.WriteString(fmt.Sprintf("  echo \"[deploy] ERROR: %s not found on PATH after install\" >&2\n", a.cli))
+	b.WriteString("  exit 1\nfi\n")
+	b.WriteString(fmt.Sprintf("echo \"[deploy] %s ready: $(command -v %s)\"\n", a.cli, a.cli))
+	return b.String()
+}
+
+// hermesGatewayWanted reports whether a Hermes deploy should also set up the
+// messaging gateway (needs the feature enabled and a bot token configured).
+func (m *model) hermesGatewayWanted() bool {
+	return m.hermesCfg.GatewayEnabled && strings.TrimSpace(m.hermesCfg.TelegramBotToken) != ""
+}
+
+// hermesEnvPy upserts the Telegram keys in ~/.hermes/.env, replacing any
+// existing (commented or live) lines and writing the file 0600. Only non-empty
+// values are written. Inputs arrive via env vars so secrets stay out of code.
+const hermesEnvPy = `import os, pathlib, re
+p = pathlib.Path(os.path.expanduser("~/.hermes/.env"))
+p.parent.mkdir(parents=True, exist_ok=True)
+text = p.read_text() if p.exists() else ""
+updates = {
+    "TELEGRAM_BOT_TOKEN": os.environ.get("TG_TOKEN", ""),
+    "TELEGRAM_ALLOWED_USERS": os.environ.get("TG_ALLOWED", ""),
+    "TELEGRAM_HOME_CHANNEL": os.environ.get("TG_HOME", ""),
+}
+keys = [k for k, v in updates.items() if v]
+out = []
+for ln in text.splitlines():
+    s = ln.lstrip()
+    if any(re.match(r"^#?\s*" + re.escape(k) + r"\s*=", s) for k in keys):
+        continue
+    out.append(ln)
+for k in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_ALLOWED_USERS", "TELEGRAM_HOME_CHANNEL"):
+    if updates[k]:
+        out.append(k + "=" + updates[k])
+p.write_text("\n".join(out).rstrip("\n") + "\n")
+os.chmod(p, 0o600)
+print("[deploy] .env updated:", ",".join(keys) or "(none)")
+`
+
+// hermesGatewayScript writes the Telegram credentials to ~/.hermes/.env and
+// installs + starts the messaging gateway unattended (user-level by default, or
+// a root system service). It ends by printing gateway status for verification.
+func (m *model) hermesGatewayScript() string {
+	h := m.hermesCfg
+	b64 := base64.StdEncoding.EncodeToString([]byte(hermesEnvPy))
+	var b strings.Builder
+	b.WriteString(`echo "[deploy] configuring Telegram credentials…"
+PY="$HOME/.hermes/hermes-agent/venv/bin/python"; [ -x "$PY" ] || PY=python3
+echo ` + b64 + ` | base64 -d > /tmp/aidt-hermes-env.py
+`)
+	b.WriteString(fmt.Sprintf("TG_TOKEN='%s' TG_ALLOWED='%s' TG_HOME='%s' \"$PY\" /tmp/aidt-hermes-env.py\n",
+		shSingle(h.TelegramBotToken), shSingle(h.TelegramAllowedUsers), shSingle(h.TelegramHomeChannel)))
+	b.WriteString(`export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
+HERMES_BIN="$(command -v hermes)"
+if [ -z "$HERMES_BIN" ] || [ ! -x "$HERMES_BIN" ]; then
+  echo "[deploy] ERROR: hermes not executable for gateway install" >&2
+  exit 1
+fi
+`)
+	if h.gatewayMode() == "system" {
+		b.WriteString(`echo "[deploy] installing gateway (system service)…"
+sudo HERMES_NONINTERACTIVE=1 HOME="$HOME" "$HERMES_BIN" gateway install --system --run-as-user "$USER" </dev/null
+`)
+	} else {
+		b.WriteString(`echo "[deploy] installing gateway (user service)…"
+HERMES_NONINTERACTIVE=1 "$HERMES_BIN" gateway install </dev/null
+loginctl enable-linger "$USER" >/dev/null 2>&1 || true
+HERMES_NONINTERACTIVE=1 "$HERMES_BIN" gateway start </dev/null || true
+`)
+	}
+	b.WriteString(`echo "[deploy] gateway status:"
+HERMES_NONINTERACTIVE=1 "$HERMES_BIN" gateway status </dev/null 2>&1 | head -20 || true
+`)
+	return b.String()
+}
+
+// hermesOllaPy rewrites ~/.hermes/config.yaml's model block to use the Olla
+// OpenAI endpoint as a custom provider, preserving every other key. Run with
+// Hermes' own venv python (which ships PyYAML). Inputs come from env vars so no
+// shell quoting of user values is needed.
+const hermesOllaPy = `import os, pathlib, yaml
+p = pathlib.Path(os.path.expanduser("~/.hermes/config.yaml"))
+cfg = yaml.safe_load(p.read_text()) if p.exists() else {}
+cfg = cfg or {}
+m = cfg.get("model")
+if not isinstance(m, dict):
+    m = {}
+m["provider"] = "custom"
+m["base_url"] = os.environ["OLLA_BASE"]
+m["api_key"] = os.environ["OLLA_KEY"]
+m["default"] = os.environ["OLLA_MODEL"]
+m.pop("api_mode", None)
+cfg["model"] = m
+p.parent.mkdir(parents=True, exist_ok=True)
+p.write_text(yaml.safe_dump(cfg, sort_keys=False))
+print("[deploy] hermes -> Olla", m["base_url"], m["default"])
+`
+
+// hermesOllaConfigScript produces the shell that points Hermes at the Olla
+// OpenAI endpoint. Hermes trusts a remote base_url when provider == "custom".
+func (m *model) hermesOllaConfigScript(model string) string {
+	base := strings.TrimRight(m.gateway, "/") + "/olla/openai/v1"
+	key := orDefault(m.token, "olla")
+	b64 := base64.StdEncoding.EncodeToString([]byte(hermesOllaPy))
+	return fmt.Sprintf(`echo "[deploy] pointing hermes at Olla (%s)…"
+PY="$HOME/.hermes/hermes-agent/venv/bin/python"; [ -x "$PY" ] || PY=python3
+echo %s | base64 -d > /tmp/aidt-hermes-olla.py
+OLLA_BASE='%s' OLLA_KEY='%s' OLLA_MODEL='%s' "$PY" /tmp/aidt-hermes-olla.py
+`, base, b64, base, key, model)
+}
+
+// agentUninstallScript returns the shell that removes an agent install from a
+// host. Best-effort by design: each step tolerates a partial/older install, and
+// user data that isn't clearly the agent's own install tree is left alone
+// (Crush keeps ~/.config/crush so a later reinstall finds its providers).
+func agentUninstallScript(a agentDef) string {
+	switch a.name {
+	case "Crush":
+		return `echo "[remove] uninstalling crush…"
+sudo dnf -y remove crush 2>/dev/null || true
+export PATH="$HOME/.npm-global/bin:$PATH"
+npm uninstall -g crush >/dev/null 2>&1 || true
+rm -f "$HOME/.local/bin/crush"
+echo "[remove] crush removed (config kept in ~/.config/crush)"
+`
+	case "Hermes":
+		return `echo "[remove] uninstalling hermes…"
+HERMES_BIN="$(command -v hermes || echo "$HOME/.local/bin/hermes")"
+if [ -x "$HERMES_BIN" ]; then
+  HERMES_NONINTERACTIVE=1 "$HERMES_BIN" gateway stop </dev/null >/dev/null 2>&1 || true
+  HERMES_NONINTERACTIVE=1 "$HERMES_BIN" gateway uninstall </dev/null >/dev/null 2>&1 || true
+fi
+systemctl --user disable --now hermes-gateway >/dev/null 2>&1 || true
+sudo systemctl disable --now hermes-gateway >/dev/null 2>&1 || true
+export PATH="$HOME/.npm-global/bin:$PATH"
+npm uninstall -g hermes >/dev/null 2>&1 || true
+rm -f "$HOME/.local/bin/hermes" "$HOME/.npm-global/bin/hermes"
+rm -rf "$HOME/.hermes"
+echo "[remove] hermes removed"
+`
+	}
+	return ""
+}
+
+// agentOpenCmd is the remote/login command "open" launches for an agent. Most
+// agents just relaunch their CLI; OmniRoute is a background service, so opening
+// it prints its dashboard URL and follows the container logs instead.
+func agentOpenCmd(a agentDef) string {
+	return loginShell(a.cli)
+}
+
+// agentRemovedMsg reports the outcome of removing an agent's deployment(s):
+// per-host uninstalls for host agents, or container deletions for Nanoclaw.
+type agentRemovedMsg struct {
+	agent     string
+	container bool
+	removed   int      // uninstalled hosts, or deleted containers
+	okHosts   []string // hosts whose uninstall succeeded (host agents)
+	errs      []string
+}
+
+// agentUninstallCmd runs an agent's uninstall script on every listed host in
+// parallel (locally when a host is this machine) and reports which succeeded.
+func agentUninstallCmd(a agentDef, hosts []string, user, pass string) tea.Cmd {
+	script := agentUninstallScript(a)
+	if script == "" {
+		return func() tea.Msg { return notifyMsg(a.name + " has no uninstall routine") }
+	}
+	return func() tea.Msg {
+		msg := agentRemovedMsg{agent: a.name}
+		var mu sync.Mutex
+		var wg sync.WaitGroup
+		for _, h := range hosts {
+			wg.Add(1)
+			go func(h string) {
+				defer wg.Done()
+				var out string
+				var err error
+				switch {
+				case isLocalHost(h):
+					b, e := exec.Command("bash", "-lc", script).CombinedOutput()
+					out, err = string(b), e
+				case pass == "":
+					err = fmt.Errorf("no SSH password configured")
+				default:
+					client, e := dialSSH(h, user, pass)
+					if e != nil {
+						err = e
+					} else {
+						out, err = runSSH(client, script)
+						client.Close()
+					}
+				}
+				mu.Lock()
+				defer mu.Unlock()
+				if err != nil {
+					msg.errs = append(msg.errs, h+": "+strings.TrimSpace(err.Error()+" "+lastNonEmptyLine(out)))
+					return
+				}
+				msg.okHosts = append(msg.okHosts, h)
+			}(h)
+		}
+		wg.Wait()
+		sort.Strings(msg.okHosts)
+		sort.Strings(msg.errs)
+		msg.removed = len(msg.okHosts)
+		return msg
+	}
+}
+
+func agentByName(name string) (agentDef, bool) {
+	for _, a := range agentCatalog {
+		if a.name == name {
+			return a, true
+		}
+	}
+	return agentDef{}, false
+}
+
+// agentHost resolves a default host for an agent: the gateway (Olla server) for
+// gateway-targeted agents, else the first known Ollama worker.
+func (m *model) agentHost(a agentDef) string {
+	if a.target == "worker" {
+		if ws := workersFromEndpoints(m.endpoints); len(ws) > 0 {
+			return ws[0].host
+		}
+		return ""
+	}
+	return hostFromURL(m.gateway)
+}
+
+// loginShell wraps a simple command so it runs in a login shell, picking up the
+// user's full PATH (ollama in /usr/local/bin, crush/npm bins in ~/.local/bin,
+// etc.). Without this, `ssh host crush` runs in a minimal non-login PATH and
+// fails with 127 even when the tool is installed.
+func loginShell(cmd string) string {
+	// Prepend common install dirs inside the login shell too — some images'
+	// .bash_profile never sources .bashrc, so npm-global/local bins stay hidden.
+	return "bash -lc 'export PATH=\"/usr/local/bin:$HOME/.local/bin:$HOME/.npm-global/bin:$PATH\"; " + cmd + "'"
+}
+
+// crushConfigJSON builds a crush.json that registers the Olla gateway as an
+// OpenAI-type provider named "olla" (so model names show through), pointing at
+// the OpenAI-compatible base URL with the configured token and discovered
+// models.
+func (m *model) crushConfigJSON() string {
+	base := strings.TrimRight(m.gateway, "/") + "/olla/openai/v1"
+	key := orDefault(m.token, "olla")
+
+	type cmodel struct {
+		ID               string `json:"id"`
+		Name             string `json:"name"`
+		ContextWindow    int    `json:"context_window"`
+		DefaultMaxTokens int    `json:"default_max_tokens"`
+	}
+	var models []cmodel
+	seen := map[string]bool{}
+	add := func(name string) {
+		if name == "" || seen[name] {
+			return
+		}
+		seen[name] = true
+		models = append(models, cmodel{ID: name, Name: name, ContextWindow: 32000, DefaultMaxTokens: 4096})
+	}
+	add(m.effDefaultModel())
+	for _, md := range m.models {
+		add(md.Name)
+	}
+
+	cfg := map[string]any{
+		"$schema": "https://charm.land/crush.json",
+		"providers": map[string]any{
+			"olla": map[string]any{
+				"type":     "openai",
+				"base_url": base,
+				"api_key":  key,
+				"models":   models,
+			},
+		},
+	}
+	b, _ := json.MarshalIndent(cfg, "", "  ")
+	return string(b)
+}

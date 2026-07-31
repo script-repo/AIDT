@@ -1,0 +1,30 @@
+# Go build artifacts (TUI)
+/tui/aidt
+/tui/aidt.exe
+/tui/aidt-*
+/tui/tui
+/tui/tui.exe
+*.test
+*.out
+
+# GoReleaser output
+/dist/
+
+# Python caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Runtime logs (MCP/TUI diagnostics)
+/logs/
+*.log
+
+# Local state / secrets (never commit)
+state.json
+*.env
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db

@@ -1,0 +1,484 @@
+# AI-Deployment-Toolkit
+
+A terminal UI (TUI) for deploying and operating an OpenAI-compatible LLM pool on
+Nutanix AHV: an [Olla](https://github.com/thushan/olla) gateway/load-balancer in
+front of one or more [Ollama](https://ollama.com) worker VMs.
+
+The TUI provisions the VMs through the Prism Central v4 API, installs Olla and
+Ollama natively as systemd services, manages the pool and models, deploys terminal
+AI agents (including containerized Nanoclaw instances) onto the nodes, and gives
+you a streaming chat — with session memory and web fetch — plus a load-balancing
+view over the gateway.
+
+```text
+OpenAI-compatible clients
+        |
+        v
+   Olla gateway VM  (load balancer, :40114)
+        |  least-connections / priority routing
+        +--> Ollama worker VM  (:11434)
+        +--> Ollama worker VM  (:11434)
+        +--> ...
+```
+
+## Install — one line, any OS
+
+Prebuilt binaries for Windows, Linux and macOS (amd64 + arm64) are published on the
+[GitHub Releases](https://github.com/script-repo/AI-Deployment-Toolkit/releases) page. Each
+archive contains `aidt` plus the bundled `scripts/` helpers, so Nutanix deploy works
+out of the box. Pick your OS and paste one line:
+
+### Linux
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/script-repo/AI-Deployment-Toolkit/main/scripts/install.sh | sh
+```
+
+No `curl`? The installer works with `wget` too:
+
+```bash
+wget -qO- https://raw.githubusercontent.com/script-repo/AI-Deployment-Toolkit/main/scripts/install.sh | sh
+```
+
+### macOS
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/script-repo/AI-Deployment-Toolkit/main/scripts/install.sh | sh
+```
+
+Both Apple Silicon (arm64) and Intel (amd64) Macs are detected automatically.
+
+### Windows (PowerShell)
+
+```powershell
+irm https://raw.githubusercontent.com/script-repo/AI-Deployment-Toolkit/main/scripts/install.ps1 | iex
+```
+
+### What the installer does
+
+* Detects your OS/arch, downloads the latest release archive, and installs to
+  `~/.ai-deployment-toolkit` (override with `AIDT_INSTALL_DIR`).
+* Links `aidt` onto your `PATH` (`~/.local/bin` on Linux/macOS; override with
+  `AIDT_BIN_DIR`). Run it afterwards with:
+
+  ```bash
+  aidt
+  ```
+
+* Pin a version with `AIDT_VERSION=v1.2.3`, e.g.
+  `AIDT_VERSION=v1.2.3 curl -fsSL …/install.sh | sh`.
+
+The installers also set up everything the **interactive features** need (best-effort):
+
+> * **OpenSSH client** (for the Console/Agents sessions): checked, and installed via the
+>   platform package manager / Windows capability when missing.
+> * **Python 3 + a dedicated virtualenv** at `<install-dir>/venv` with `requests` and
+>   `paramiko` from `requirements.txt` (for Nutanix deploy/delete). The TUI auto-discovers
+>   this venv, so no `AIDT_PYTHON` export is needed.
+>
+> System-package installs run non-interactively and never block a piped install; if a
+> dependency can't be installed automatically the script prints the exact command to run.
+> Set `AIDT_SKIP_DEPS=1` to skip dependency setup entirely. The core features (gateway,
+> pool, models, chat, load) need none of these — just the static binary. You can still
+> override the interpreter/script path with `AIDT_PYTHON` and `AIDT_VM_SCRIPT`.
+
+## Build from source
+
+```bash
+# build (Go 1.25+); produces tui/aidt(.exe)
+cd tui
+go build -o aidt .
+
+# run (first launch prompts for the gateway + SSH credentials and remembers them)
+./aidt
+
+# …or pre-seed them via flags / environment variables
+./aidt --gateway http://gateway-host:40114 \
+    --ssh-user rocky --ssh-password 'your-ssh-password'
+```
+
+Tagging a release (`git tag v0.1.0 && git push origin v0.1.0`) triggers the GoReleaser
+workflow (`.github/workflows/release.yml`), which cross-compiles all six OS/arch targets and
+uploads the archives + checksums to GitHub Releases.
+
+## Using the TUI
+
+The TUI is written in Go with the [Charm](https://github.com/charmbracelet) stack —
+**Bubble Tea** (runtime), **Huh** (modal forms), **Bubbles** (`list`, `help`, `key`,
+`progress`, `textarea`, `viewport`, `spinner`), **Lip Gloss** (styling/layout) and
+**Glamour** (markdown rendering for streamed chat replies).
+
+The layout is a **left sidebar (menu) + content pane** master/detail. The sidebar is the home
+base; pick a section, then press `Enter` to focus its content and `Esc` to come back to the menu.
+
+Navigation:
+
+* `↑/↓` (or `j/k`) move through the menu; `1`–`9` (and `0` for the tenth) jump straight to a section.
+* `Enter` focus the content pane · `Esc` back to the menu.
+* `c` open the **Connect** form (gateway URL + SSH creds) · `d` disconnect · `r` refresh.
+* `/` filter any list · `?` toggle the full keybinding legend · `q`/`Ctrl+C` quit.
+
+A live, context-aware **help bar** (`bubbles/help`) renders the relevant keys for wherever you
+are, and forms (connect / add endpoint / pull / deploy) appear as centered **Huh** modals with
+validation and `Esc`-to-cancel. Inside a form, `Tab`/`Enter` move to the next field and
+`Shift+Tab` (or `Ctrl+P`, for terminals/consoles that don't send Shift+Tab) move back.
+
+Sections:
+
+* **Dashboard** — live metric cards (clients, req/s, throughput, latency, success, uptime) plus a
+  request-rate sparkline.
+* **Pool** — a filterable `bubbles/list` of Ollama endpoints; each row also shows the **source
+  image** of the backing VM. `a` opens the add-endpoint modal,
+  `x` removes the selected one; both edit the gateway's `/etc/olla/olla.yaml` over SSH
+  (Go `x/crypto/ssh`) and restart Olla.
+* **Models** — filterable list of pool models. `p` opens the pull modal (animated `bubbles/progress`
+  gradient bar), `x` deletes the selected model, and `Enter` makes it the active chat model.
+  This is how you swap the model Ollama serves.
+* **Chat** — a multi-line `bubbles/textarea` composer; prompts go to
+  `/olla/openai/v1/chat/completions` and the reply **streams token-by-token live**, then renders as
+  Glamour markdown when complete, reporting TTFT and tokens/sec.
+  * **Session memory** — every request replays the recent conversation (bounded to the last
+    24 turns / ~24k chars), so follow-up questions keep their context.
+  * **New session** — `Ctrl+N` clears the conversation and starts fresh; the status line shows
+    how many turns the current session holds.
+  * **Web fetch** — paste one or more URLs (up to 3) into a prompt and the TUI downloads each
+    page, strips it to readable text, and hands it to the model as context — basic web access
+    for otherwise-offline pool models. Fetch progress shows in the notice line.
+* **Agents** — deploy and open terminal AI agents over SSH on the managed hosts:
+  * **Crush** (gateway) — Charm's coding agent, installed on the Olla server and pointed at the
+    OpenAI endpoint so it load-balances across the whole pool.
+  * **OpenClaw** and **Hermes** (worker) — OpenClaw via `ollama launch`; Hermes via the official
+    installer (with `ollama launch` as fallback). Hermes can also set up its Telegram messaging
+    gateway unattended (`e` to configure).
+  * **Nanoclaw** (worker) — a lightweight agent that runs as **Docker containers** on any
+    worker; deploy it multiple times (or set **Instances** > 1) to run several isolated
+    instances side-by-side on the same node. See below.
+  * **OmniRoute** (worker) — the free [OmniRoute](https://github.com/diegosouzapw/OmniRoute) AI
+    gateway, deployed from its official Docker image as **redis + app** on a shared Docker
+    network. Dashboard on `20128`, OpenAI-compatible API on `20129`, live WS on `20132`. First
+  deploy writes production secrets to `/opt/aidt/omniroute.env`. SQLite state lives in the
+    named `omniroute-data` volume. Opening it (`enter`/`o`) prints the reachable URLs and
+    follows the container logs.
+
+  `enter`/`o` opens an agent, `d` deploys one; worker agents prompt for the target worker.
+  `i` shows the **Nanoclaw instance overview**: every container across every worker Nanoclaw
+  was ever deployed to (queried in parallel over SSH), with per-instance status and image —
+  including stopped/crashed containers, and per-host errors when a worker is unreachable.
+  `x` **removes a deployed agent**: host agents (Crush/OpenClaw/Hermes) get uninstalled from
+  the chosen host (or every host, when deployed on several) and deregistered; for Nanoclaw
+  the TUI fetches the live container inventory first and opens a **per-instance picker** —
+  delete one instance on one worker, or all of them everywhere, with a toggle for whether the
+  per-instance state volume goes too. The registration is reconciled against what is actually
+  left on the workers, so the ✓ badge clears exactly when the last install disappears.
+* **Buzz** — a self-hosted [block/buzz](https://github.com/block/buzz) relay on the gateway
+  (see below). The TUI joins as `operator` via buzz-cli: live channel feed, peers seen in
+  traffic, and a composer. `enter` sends, `ctrl+r` refreshes, `ctrl+d` deploys/updates the
+  Buzz compose stack on the gateway host.
+* **Load** — load-balancing visualization: per-worker cumulative request share,
+  active-connection bars, a gateway throughput sparkline, and a `◀ busiest` marker on the worker
+  currently taking the most load.
+* **Nutanix** — Prism Central server + managed gateway/worker VMs (filterable list); each VM row
+  shows its **source image**. `g` deploy a
+  gateway, `w` deploy a worker (auto-named, registered with the connected gateway). The worker
+  deploy modal has an **Instances** field: set it above `1` to provision that many workers in
+  parallel (names auto-increment, e.g. `ollama-worker-04..06`); they all register with the gateway
+  in a single batched `olla.yaml` write so concurrent deploys don't race. `c` opens the
+  **custom deployments** submenu (see below), `o` install
+  Olla on **this** server (no Nutanix VM — see below), `n` show the next free name, `r` refresh,
+  `x` delete the selected VM. Deploys open a Huh modal, then run `nutanix_olla_vm.py` as a
+  subprocess and stream output into the log pane. The PC API key is read at runtime from
+  `~/.cursor/mcp.json` and never stored in code. The client auto-negotiates the Prism Central v4
+  API version (it tries `v4.2`, then `v4.1`, then `v4.0`) so it works across PC releases.
+* **Access** — create/rotate a client API token (`t`/`X`); shows the OpenAI Base URL, token, model
+  and a `curl` example.
+* **Update** — maintenance & upgrades. A list of seven actions (`enter` to run, `esc` to go back),
+  each streaming its output into the Output pane below:
+  1. **Update local machine** — downloads and runs the latest installer for this OS.
+  2. **Update gateway (Olla)** — SSHes to the gateway and reinstalls the latest Olla.
+  3. **Update agents** — upgrades Crush (gateway), re-launches OpenClaw, reinstalls/repoints
+     Hermes, rebuilds + recreates Nanoclaw containers, and pulls + recreates OmniRoute
+     (redis + app) where deployed.
+  4. **Update image** — changes the image used for new deployments (live PC image dropdown), and
+     can **seed a new image into Prism Central**: choose a built-in **preset** (Rocky Linux 9,
+     Rocky Linux 10, Ubuntu 24.04) or paste any qcow2/img **URL** (with an optional name). It is
+     imported via the v4 Images API, then set as the deployment image. Maps to
+     `nutanix_olla_vm.py seed-image --name <n> --image-url <url>`.
+  5. **Update OS** — pick gateways/workers in a multi-select, then runs `dnf -y update` on each.
+  6. **Update all** — OS on every managed host, agents, Olla on gateways, and Ollama on workers.
+  7. **Update Ollama cloud keys** — sets `OLLAMA_API_KEY` on one or all workers (applied via a
+     systemd drop-in and a service restart; the key is not saved to `tui.json`).
+
+  Remote steps run non-interactively over SSH using the managed key, so the target hosts need
+  passwordless `sudo` (which the deploy cloud-init configures).
+
+### First launch
+
+With no saved configuration the TUI first looks for an Olla gateway **on the machine it is
+running on** (`:40114`, the default-route address first, then loopback). If it finds one it
+connects straight to it and saves that URL — so SSHing into a gateway VM and running
+`aidt` needs no setup at all. Only when nothing is listening locally does it open the
+**Connect** form and ask for a remote gateway URL and SSH credentials; nothing is hardcoded.
+
+Those values are saved to `~/.ai-deployment-toolkit/tui.json` (mode `0600`) and reused on later
+runs, so the local probe only happens while the TUI is unconfigured. Gateway URL, SSH user and
+password can also be supplied up front via the `OLLA_GATEWAY`, `OLLA_SSH_USER` and
+`OLLA_SSH_PASSWORD` environment variables (flags/env take precedence over the saved values, and
+skip the probe). The VM password for Nutanix deploys is entered in the **Nutanix** settings form
+(`e`) — deploys are blocked until it is set.
+
+### Nanoclaw — containerized agent instances on the workers
+
+Nanoclaw is the Agents section's containerized agent: instead of a host install, each
+deploy starts one or more **Docker containers** on the worker you pick, so any worker node
+can host it — and the same node can run **many isolated instances at once**.
+
+Deploying (press `d` on Nanoclaw in the **Agents** section):
+
+1. Pick the target worker and how many **Instances** to start (default `1`).
+2. The deploy bootstraps Docker on the worker if needed (docker-ce on Rocky/RHEL,
+   `get.docker.com` on Ubuntu/Debian) and builds the shared `aidt/nanoclaw` image
+   (from the upstream [NanoClaw](https://github.com/qwibitai/nanoclaw) project). The image
+   is rebuilt whenever the TUI's Dockerfile has changed since it was last built (tracked
+   via an image label with the Dockerfile's hash), and existing containers are then
+   recreated on the fresh image — so a worker bootstrapped by an older TUI converges on
+   the next deploy instead of stamping out containers from a stale image.
+3. Each instance gets the next free auto-incremented container name (`nanoclaw-01`,
+   `nanoclaw-02`, …) and its **own named state volume** (`aidt-nanoclaw-NN`), started
+   with `--restart unless-stopped` so instances survive reboots.
+4. Every container is wired to **Olla for inference** and **Buzz** for presence:
+   * **Inference (OneCLI → Olla).** On first boot the image installs [OneCLI](https://onecli.sh)
+     (required by upstream NanoClaw for agent container spawns), writes `.env` with
+     `ANTHROPIC_BASE_URL=http://<gateway>/olla/anthropic` plus `ONECLI_URL` /
+     `ONECLI_API_KEY`, and registers a OneCLI secret (`OilsandOlla`) whose host-pattern
+     matches the gateway hostname so the vault injects `Authorization: Bearer <token>`
+     on the wire. The Claude provider baked into the image forwards that base URL into
+     agent containers. Progress/errors land in `/var/log/aidt-olla.log`.
+   * **Buzz.** `AIDT_BUZZ_RELAY_URL` / `AIDT_BUZZ_CHANNEL` / `AIDT_BUZZ_NAME` (and
+     optional `AIDT_BUZZ_CHANNEL_ID`) are set at deploy time; a join script + buzz-cli
+     baked into the image keep presence on the default `aidt` channel so instances show
+     up in the **Buzz** section.
+
+Deploying again — to the same worker or a different one — simply adds more instances; names
+never collide. Opening Nanoclaw (`enter`/`o`) refreshes the live inventory and lets you pick
+a **running instance** to **chat with**: it attaches to NanoClaw's built-in **CLI channel**
+(`data/cli.sock`) via a read-loop around `pnpm`/`tsx scripts/chat.ts`. Type a line and press
+enter; session context persists server-side between lines. First reply after a cold start can
+take 30–60s while the agent sandbox boots.
+
+| In chat | Action |
+|---------|--------|
+| any text | send to the agent on `cli/local` |
+| `/shell` | admin bash with `ncl` on `PATH` |
+| `/help` | short crib sheet |
+| `/exit` | leave back to the AIDT TUI |
+
+> `ncl` remains the **admin** CLI (one-shot over `data/ncl.sock`) — use `/shell` then
+> `ncl groups list`, `ncl sessions list`, etc. The host auto-runs
+> `scripts/init-cli-agent.ts` once so an agent is wired to the CLI channel.
+
+Before handing over the terminal the TUI checks the container is actually running. If it
+isn't, you get a notice naming the instance, its state and its last log line, instead of a
+session that opens and instantly closes with the reason already scrolled away.
+
+`i` in the Agents section shows all instances across every worker at once (including stopped
+ones), and remains the place to check status or read logs by hand (`sudo docker logs …`).
+**Update ▸ Update agents** rebuilds the image against upstream and **recreates** the
+containers on the new image (a plain restart would leave them on the old one); each
+instance's env config and named state volume carry over.
+
+To delete instances, press `x` on Nanoclaw in the **Agents** section: the TUI lists every
+instance across every worker and lets you pick one (or all), with a Yes/No toggle for
+deleting the matching state volume. Or manage them by hand on the worker:
+
+```bash
+sudo docker ps --filter name=nanoclaw-            # list instances
+sudo docker logs -f nanoclaw-02                   # follow one instance
+sudo docker exec -it nanoclaw-02 bash             # shell inside it (ncl is on PATH)
+sudo docker exec -it nanoclaw-02 ncl groups list  # or run one ncl command directly
+sudo docker exec nanoclaw-02 cat /var/log/aidt-buzz.log         # Buzz join/presence log
+sudo docker exec nanoclaw-02 cat /var/log/aidt-olla.log         # OneCLI → Olla wiring
+sudo docker rm -f nanoclaw-02                     # remove an instance
+sudo docker volume rm aidt-nanoclaw-02         # …and its state
+```
+
+Existing Nanoclaw workers need an **image rebuild** to pick this up: deploy again (or
+**Update ▸ Update agents**), which rebuilds `aidt/nanoclaw` from the new Dockerfile and
+recreates containers. After that, confirm wiring with the olla log above — you should see
+`OneCLI secret OilsandOlla` and `Olla wiring complete`.
+
+### Buzz — shared workspace for humans and agents
+
+The **Buzz** section is a self-hosted [block/buzz](https://github.com/block/buzz) relay on the
+**gateway host**, plus an in-TUI chat surface driven by `buzz-cli`. Press `ctrl+d` in Buzz to
+deploy it (idempotent): the TUI stages upstream `deploy/compose` under `/opt/aidt/buzz`,
+writes a LAN-friendly `.env` (no `CHANGE_ME` left), starts the stack via `./run.sh start`,
+installs buzz-cli from the image, opens firewall port **3000**, and ensures a default channel
+named `aidt`. Operator credentials are stored as `operator.key` / `channel.id` on the
+gateway and cached in the TUI settings file.
+
+Entering the section auto-loads credentials (SSH or local) and polls the channel every few
+seconds. `enter` sends a message; `ctrl+r` refreshes the feed.
+
+```bash
+# On the gateway after deploy
+export BUZZ_RELAY_URL=http://127.0.0.1:3000
+export BUZZ_PRIVATE_KEY=$(sudo cat /opt/aidt/buzz/operator.key)
+buzz channels list
+buzz messages get --channel "$(sudo cat /opt/aidt/buzz/channel.id)" --limit 20
+buzz messages send --channel "$(sudo cat /opt/aidt/buzz/channel.id)" --content 'hi agents'
+```
+
+**How Nanoclaw instances join.** Deploy passes `AIDT_BUZZ_RELAY_URL=http://<gateway>:3000`
+and a per-instance `AIDT_BUZZ_NAME`. The image copies `buzz` from `ghcr.io/block/buzz` and
+runs `aidt-join-buzz.sh` in the background: it generates a Nostr key on the state volume,
+joins the `aidt` channel, and keeps presence online. This is **presence only** — it does
+not feed the channel into the agent's reasoning. Use in-container `ncl` for administration.
+
+If the feed is empty: deploy Buzz with `ctrl+d`, then **re-deploy Nanoclaw** so the image is
+rebuilt with buzz-cli/join and containers are recreated. Check
+`sudo docker exec <name> cat /var/log/aidt-buzz.log` on the worker; the worker must reach
+the gateway on TCP **3000**.
+
+First-time Buzz deploy is intended for a trusted LAN (`BUZZ_REQUIRE_AUTH_TOKEN=false` and
+open membership). Tighten `.env` under `/opt/aidt/buzz` before exposing it beyond the lab.
+
+### Install Olla locally (no Nutanix VM)
+
+If you are running the TUI on the Linux box that should host the gateway (for example over
+SSH), press `o` in the **Nutanix** section to install Olla on that machine instead of
+provisioning a VM. This runs `scripts/remote/install-olla.sh` (via `sudo`) to install the Olla
+binary, write `/etc/olla/olla.yaml`, and start the `olla` systemd service on `:40114`; the TUI
+then connects to `http://<host-primary-ip>:40114` automatically (the external IP of the host's
+default-route NIC, so the gateway is reachable from other machines). Linux only, and it needs passwordless
+`sudo` (or run the TUI as root) since the installer can't service an interactive password prompt.
+
+When the gateway is this local host, agents that run on the gateway (for example Crush) are
+installed and launched directly — no SSH password is required for them.
+
+### Custom deployment types
+
+Beyond the built-in gateway/worker patterns, you can define your own deployment types. Press
+`c` in the **Nutanix** section to open the custom-deployments submenu:
+
+* The first row, **+ add deployment**, opens a form asking for a **name** and a **setup
+  script**. The setup script can be either a bare **URL** (downloaded to the VM and run with
+  `sudo bash`) or a full **shell command** (e.g. `curl -fsSL <url> | sudo bash`) run verbatim on
+  the guest. Saved configs persist in `~/.ai-deployment-toolkit/tui.json`. Two examples (`NP4M`,
+  `NRCC`) are pre-populated on first run.
+* You can also give a config an optional **workload access link** (scheme + port + path). After a
+  successful deploy the TUI shows `<scheme>://<vm-ip>:<port><path>` as a **clickable link** (OSC 8
+  hyperlink — click or ctrl/cmd-click in a supporting terminal) and you can press **b** to open it
+  in a browser.
+* Highlight a saved config and press **enter** to deploy: the TUI provisions a VM from the
+  Nutanix settings image/cluster/subnet, waits for cloud-init, then runs your setup script/command.
+  VM names auto-increment from the deployment name (e.g. `postgres-node-01`, `postgres-node-02`).
+* Press **x** on a saved config to delete it. **esc** returns to the VM list.
+
+This maps to the helper's `pattern-custom` subcommand:
+
+```bash
+# --script-url accepts a bare URL (downloaded + sudo bash'd) or a full command
+scripts/nutanix_olla_vm.py pattern-custom \
+  --script-url https://example.com/setup.sh \
+  --name-prefix postgres-node- \
+  --image-name <image> --cluster-name <cluster> --subnet-name <subnet> \
+  --vm-password "$AIDT_VM_PASSWORD"
+```
+
+## VM (AHV) deployment — Patterns A and B
+
+The TUI's Nutanix section drives `scripts/nutanix_olla_vm.py`, which can also be run directly.
+It provisions a Rocky Linux VM through the Prism Central v4 API with a cloud-init script, then
+SSHes in to install software natively as systemd services.
+
+* Pattern A: provision the VM, install Olla (the gateway/load balancer), and install the
+  **aidt on the gateway itself** so you can `ssh rocky@<gateway>` and run `aidt`
+  to manage the pool from that box. It auto-connects to the local Olla on launch. This uses the
+  same `scripts/install.sh` you'd run locally; pass `--no-install-tui` to skip it. A failed TUI
+  install is reported but never fails the deploy — the gateway itself is unaffected.
+* Pattern B: provision the VM, install Ollama and pull a model (default `rnj-1`), then
+  register the new worker with an existing Olla instance (defaults to the Pattern A VM).
+
+**SSH keys are set up at first boot.** Every deploy passes the TUI's managed public key
+(`~/.ai-deployment-toolkit/keys/id_ed25519.pub`, created on demand) into the guest's cloud-init as
+an `ssh_authorized_keys` entry for the VM user. Console sessions, agent installs and the Update
+actions therefore authenticate by key from the moment the VM comes up — no password prompts. On
+the CLI, pass the key with `--ssh-pubkey "$(cat ~/.ssh/id_ed25519.pub)"` or set
+`AIDT_SSH_PUBKEY`; omit it and the guest simply falls back to password auth as before.
+
+Install dependencies and set Prism Central credentials:
+
+```bash
+pip install -r requirements.txt
+export PRISM_CENTRAL_URL="https://prism-central-host:9440"
+export PRISM_USER="admin"
+export PRISM_PASSWORD="********"
+# guest (cloud-init) password for the new VM — no default is shipped
+export AIDT_VM_PASSWORD="your-vm-password"
+# placement — no lab defaults are baked in (the TUI offers these as live
+# dropdowns from Prism Central; the CLI needs them passed or set as env vars)
+export AIDT_IMAGE_NAME="Rocky-9-GenericCloud-Base.latest.x86_64.qcow2"
+export AIDT_CLUSTER_NAME="your-cluster"
+export AIDT_SUBNET_NAME="your-subnet"
+```
+
+Pattern A (8 vCPU / 12 GiB / 50 GiB). The guest password and placement (image / cluster /
+subnet) must be supplied — via the env vars above, or explicit flags:
+
+```bash
+scripts/nutanix_olla_vm.py pattern-a --vm-name olla-gateway-01 \
+    --image-name "$AIDT_IMAGE_NAME" --cluster-name "$AIDT_CLUSTER_NAME" \
+    --subnet-name "$AIDT_SUBNET_NAME"
+```
+
+Pattern B (registers with the Pattern A Olla recorded in `~/.ai-deployment-toolkit/state.json`):
+
+```bash
+scripts/nutanix_olla_vm.py pattern-b --vm-name ollama-worker-01 --model rnj-1
+# or register with a specific Olla instance:
+scripts/nutanix_olla_vm.py pattern-b --model rnj-1 --olla-url http://gateway-host:40114
+```
+
+To deploy many workers in parallel without each one racing on the gateway config, provision them
+with `--no-register` (which prints `AIDT_ENDPOINT <json>` instead of touching `olla.yaml`), then
+register the whole batch in one pass — this is exactly what the TUI's **Instances** field does:
+
+```bash
+scripts/nutanix_olla_vm.py pattern-b --no-register --vm-name ollama-worker-04 --model rnj-1 --olla-url http://gateway-host:40114
+scripts/nutanix_olla_vm.py pattern-b --no-register --vm-name ollama-worker-05 --model rnj-1 --olla-url http://gateway-host:40114
+# ...then one batched registration (single olla.yaml write + restart):
+scripts/nutanix_olla_vm.py register-endpoints --olla-url http://gateway-host:40114 \
+  --endpoint name=ollama-worker-04,url=http://10.0.0.4:11434 \
+  --endpoint name=ollama-worker-05,url=http://10.0.0.5:11434
+```
+
+There are **no baked-in placement defaults**. In the TUI, the Nutanix settings form populates
+**Image**, **Cluster** and **Subnet** as dropdowns polled live from Prism Central (it falls back
+to free-text if PC isn't reachable yet). On the CLI, pass `--image-name`, `--cluster-name` and
+`--subnet-name` (or the `AIDT_*` env vars). VM sizing can still be tuned with `--num-sockets`,
+`--cores-per-socket`, `--memory-gib`, and `--disk-gib`. Use `--dry-run` to print the VM create
+body and cloud-init without creating anything. The remote installers live in `scripts/remote/`.
+
+### Worker auto-increment naming
+
+When you deploy a worker without an explicit name, `nutanix_olla_vm.py` scans Prism Central for
+existing `ollama-worker-NN` VMs and uses the next index (zero-padded), restarting at `01` when
+none exist. Gateways follow the same scheme with `olla-gateway-NN`. Query it directly:
+
+```bash
+scripts/nutanix_olla_vm.py next-name --role worker  --prism-url https://prism-central-host:9440
+scripts/nutanix_olla_vm.py next-name --role gateway --prism-url https://prism-central-host:9440
+```
+
+### Prism Central helper subcommands
+
+`nutanix_olla_vm.py` also supports API-key auth (`--prism-api-key` / `PRISM_API_KEY`) in
+addition to user/password, plus VM lifecycle helpers used by the TUI:
+
+```bash
+# Show info for the managed VMs (JSON)
+scripts/nutanix_olla_vm.py show --name-prefix oll --prism-url https://prism-central-host:9440
+
+# Delete a VM by name
+scripts/nutanix_olla_vm.py delete --name ollama-worker-02 --prism-url https://prism-central-host:9440
+```
