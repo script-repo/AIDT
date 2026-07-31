@@ -12,7 +12,7 @@ import (
 )
 
 // installerBaseURL is the raw GitHub location the one-line installers live at.
-const installerBaseURL = "https://raw.githubusercontent.com/script-repo/AI-Deployment-Toolkit/main/scripts"
+const installerBaseURL = "https://raw.githubusercontent.com/script-repo/AIDT/HEAD/scripts"
 
 // updateAction identifies one of the maintenance actions in the Update section.
 type updateAction int

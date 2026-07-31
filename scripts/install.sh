@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 # One-line installer for the AI-Deployment-Toolkit TUI (Linux/macOS).
 #
-#   curl -fsSL https://raw.githubusercontent.com/script-repo/AI-Deployment-Toolkit/main/scripts/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/script-repo/AIDT/HEAD/scripts/install.sh | sh
 #
 # Downloads the latest GitHub release archive for your OS/arch and extracts the
 # binary together with the bundled scripts/ helpers (so Nutanix deploy works).
@@ -9,7 +9,7 @@
 # AIDT_INSTALL_DIR=/some/dir.
 set -eu
 
-REPO="script-repo/AI-Deployment-Toolkit"
+REPO="script-repo/AIDT"
 BIN_NAME="aidt"
 INSTALL_DIR="${AIDT_INSTALL_DIR:-$HOME/.ai-deployment-toolkit}"
 

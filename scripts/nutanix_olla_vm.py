@@ -724,7 +724,7 @@ def install_tui_on_guest(ssh: Ssh) -> bool:
 
     Prefers the bundled scripts/install.sh (shipped in the release archive). If
     that file is missing (older releases), falls back to curling the raw
-    installer from GitHub main — same one-liner operators run by hand.
+    installer from GitHub HEAD — same one-liner operators run by hand.
     """
     remote = "/tmp/install-aidt.sh"
     installer = SCRIPTS_DIR / "install.sh"
@@ -737,7 +737,7 @@ def install_tui_on_guest(ssh: Ssh) -> bool:
     else:
         log(f"bundled install.sh not found at {installer}; curling from GitHub")
         cmd = (
-            "curl -fsSL https://raw.githubusercontent.com/script-repo/AI-Deployment-Toolkit/main/scripts/install.sh "
+            "curl -fsSL https://raw.githubusercontent.com/script-repo/AIDT/HEAD/scripts/install.sh "
             f"| tee {remote} >/dev/null && chmod +x {remote} && sh {remote}"
         )
     # Ensure ~/.local/bin is on PATH for future login shells (install.sh links there).
@@ -845,7 +845,7 @@ def finish_pattern_a(ip: str, args: argparse.Namespace, vm_name: str, vm_ext_id:
     if not tui_installed and not getattr(args, "no_install_tui", False):
         log(
             "warning: aidt was NOT installed on the gateway. "
-            f"On the guest run: curl -fsSL https://raw.githubusercontent.com/script-repo/AI-Deployment-Toolkit/main/scripts/install.sh | sh"
+            f"On the guest run: curl -fsSL https://raw.githubusercontent.com/script-repo/AIDT/HEAD/scripts/install.sh | sh"
         )
     log("Pattern A complete: Olla is installed and serving.")
     if tui_installed:

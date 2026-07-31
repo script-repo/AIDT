@@ -7,7 +7,7 @@
   the binary together with the bundled scripts/ helpers (so Nutanix deploy works).
 
 .EXAMPLE
-  irm https://raw.githubusercontent.com/script-repo/AI-Deployment-Toolkit/main/scripts/install.ps1 | iex
+  irm https://raw.githubusercontent.com/script-repo/AIDT/HEAD/scripts/install.ps1 | iex
 
 .NOTES
   Override with env vars before running:
@@ -16,7 +16,7 @@
 #>
 $ErrorActionPreference = 'Stop'
 
-$Repo    = 'script-repo/AI-Deployment-Toolkit'
+$Repo    = 'script-repo/AIDT'
 $BinName = 'aidt'
 $InstallDir = if ($env:AIDT_INSTALL_DIR) { $env:AIDT_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA 'aidt' }
 
@@ -106,7 +106,7 @@ try {
       try {
         Copy-Item -LiteralPath $_.FullName -Destination $dest -Force
       } catch {
-        Fail "could not install $BinName.exe while it is running. Close aidt and re-run: irm https://raw.githubusercontent.com/script-repo/AI-Deployment-Toolkit/main/scripts/install.ps1 | iex"
+        Fail "could not install $BinName.exe while it is running. Close aidt and re-run: irm https://raw.githubusercontent.com/script-repo/AIDT/HEAD/scripts/install.ps1 | iex"
       }
       # Best-effort cleanup of previous binary; ignore if still mapped.
       Remove-Item -LiteralPath $bak -Force -ErrorAction SilentlyContinue
