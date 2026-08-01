@@ -66,6 +66,18 @@ func TestCrushDeployScriptShellSyntax(t *testing.T) {
 	}
 }
 
+func TestCrushOpensInDedicatedWorkspace(t *testing.T) {
+	for _, want := range []string{
+		`mkdir -p "$HOME/.ai-deployment-toolkit/crush-workspace"`,
+		`cd "$HOME/.ai-deployment-toolkit/crush-workspace"`,
+		"exec crush",
+	} {
+		if !strings.Contains(crushOpenCommand, want) {
+			t.Errorf("Crush launch command missing %q", want)
+		}
+	}
+}
+
 func mustAgent(t *testing.T, name string) agentDef {
 	t.Helper()
 	a, ok := agentByName(name)

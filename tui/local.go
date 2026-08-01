@@ -104,7 +104,7 @@ func localCrushCmd(config, script, label, agent string) tea.Cmd {
 		if err := localMergeCrushConfig(config); err != nil {
 			return notifyMsg("crush config write failed: " + err.Error())
 		}
-		cmd := "crush"
+		cmd := crushOpenCommand
 		if script != "" {
 			abs, err := localWriteScript("~/.aidt-deploy.sh", script)
 			if err != nil {

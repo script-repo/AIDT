@@ -141,6 +141,11 @@ echo "[deploy] Crush ready: $CRUSH_BIN"
 echo "[deploy] Open Crush from Agents (enter/o)."
 `
 
+// crushOpenCommand gives Crush a stable, empty workspace instead of inheriting
+// the directory AIDT happened to be launched from. Crush inventories its current
+// workspace on startup to build project context.
+const crushOpenCommand = `mkdir -p "$HOME/.ai-deployment-toolkit/crush-workspace" && cd "$HOME/.ai-deployment-toolkit/crush-workspace" && exec crush`
+
 // agentCatalog is the set of agents offered in the Agents section.
 //
 //   - Crush runs on the Olla server and talks to the Olla OpenAI endpoint (so it

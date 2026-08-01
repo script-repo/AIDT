@@ -191,6 +191,10 @@ through their supported installer environment variables. Custom definitions are
 intentionally arbitrary remote execution and should only use trusted, reviewed
 sources; generic installers can read `PORT` or `AIDT_SERVICE_PORT`.
 
+Before NP4M runs on Ubuntu or Debian, AIDT installs `python3-venv`, detects the
+highest installed Python version, installs its matching `pythonX.Y-venv`
+package, and verifies that the interpreter can create a virtual environment.
+
 ```bash
 python scripts/nutanix_olla_vm.py pattern-custom \
   --script-url https://example.com/setup.sh \
@@ -277,6 +281,11 @@ The current catalog contains:
 Press `d` in the Agents section to deploy the selected agent. Press `Enter` or
 `o` to open it over SSH. Removal uninstalls the selected agent from its
 registered hosts.
+
+Crush normally inventories its current directory at startup to build project
+context. AIDT launches it in the dedicated
+`~/.ai-deployment-toolkit/crush-workspace` directory so it does not scan the
+directory from which AIDT was started.
 
 ## Runtime State
 

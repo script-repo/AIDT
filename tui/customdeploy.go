@@ -17,6 +17,33 @@ const (
 	nrccLegacy  = "curl -fsSL https://raw.githubusercontent.com/script-repo/ntnx-console-client/main/install.sh | bash"
 )
 
+// np4mDebianVenvPreflight works around Debian-family Python installations where
+// `import venv` succeeds but creating a venv fails because ensurepip lives in a
+// separate pythonX.Y-venv package.
+const np4mDebianVenvPreflight = `if [ -r /etc/os-release ]; then . /etc/os-release; fi
+case "${ID:-} ${ID_LIKE:-}" in
+  *ubuntu*|*debian*)
+    echo "[deploy] ensuring Python venv support for NP4M..."
+    sudo -n apt-get update -y
+    sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y python3-venv python3-pip
+    NP4M_PY_BIN=""
+    for candidate in python3.13 python3.12 python3.11 python3.10 python3; do
+      if command -v "$candidate" >/dev/null 2>&1; then NP4M_PY_BIN="$(command -v "$candidate")"; break; fi
+    done
+    if [ -n "$NP4M_PY_BIN" ]; then
+      NP4M_PY_VER="$($NP4M_PY_BIN -c 'import sys; print(str(sys.version_info.major)+"."+str(sys.version_info.minor))')"
+      sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y "python${NP4M_PY_VER}-venv"
+      NP4M_VENV_PROBE="$(mktemp -d /tmp/aidt-np4m-venv-XXXXXX)"
+      if ! "$NP4M_PY_BIN" -m venv "$NP4M_VENV_PROBE"; then
+        rm -rf "$NP4M_VENV_PROBE"
+        echo "[deploy] ERROR: $NP4M_PY_BIN still cannot create a virtual environment" >&2
+        exit 1
+      fi
+      rm -rf "$NP4M_VENV_PROBE"
+    fi
+    ;;
+esac`
+
 // customRun tracks a custom deployment until its setup command completes. A
 // service URL is persisted only after a successful terminal ProcEvent.
 type customRun struct {
@@ -291,7 +318,8 @@ func customCommand(cfg customDeploy) string {
 	port := orDefault(cfg.Port, "8443")
 	switch {
 	case cfg.Name == "NP4M" && cfg.ScriptURL == np4mInstall:
-		return "curl -fsSL https://raw.githubusercontent.com/script-repo/ntnx-np4m/main/install.sh | sudo env NP4M_PORT=" + port + " bash"
+		return np4mDebianVenvPreflight + "\n" +
+			"curl -fsSL https://raw.githubusercontent.com/script-repo/ntnx-np4m/main/install.sh | sudo env NP4M_PORT=" + port + " bash"
 	case cfg.Name == "NRCC" && (cfg.ScriptURL == nrccInstall || cfg.ScriptURL == nrccLegacy):
 		return "curl -fsSL https://raw.githubusercontent.com/script-repo/ntnx-console-client/main/install.sh | NRCC_NO_OPEN=1 NRCC_PORT=" + port + " bash"
 	default:

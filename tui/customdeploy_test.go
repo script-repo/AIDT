@@ -80,9 +80,21 @@ func TestBuiltinCustomCommandsReceiveAssignedPort(t *testing.T) {
 	if !strings.Contains(np4m, "sudo env NP4M_PORT=8444 bash") {
 		t.Fatalf("NP4M command does not receive assigned port: %s", np4m)
 	}
+	for _, want := range []string{"python3-venv", `python${NP4M_PY_VER}-venv`, `-m venv "$NP4M_VENV_PROBE"`} {
+		if !strings.Contains(np4m, want) {
+			t.Errorf("NP4M command missing venv prerequisite %q", want)
+		}
+	}
 	nrcc := customCommand(customDeploy{Name: "NRCC", ScriptURL: nrccInstall, Port: "8445"})
 	if !strings.Contains(nrcc, "NRCC_NO_OPEN=1 NRCC_PORT=8445 bash") {
 		t.Fatalf("NRCC command does not receive assigned port: %s", nrcc)
+	}
+	if bash, err := exec.LookPath("bash"); err == nil {
+		cmd := exec.Command(bash, "-n")
+		cmd.Stdin = strings.NewReader(customSetupScript(customDeploy{Name: "NP4M", ScriptURL: np4mInstall, Port: "8444"}))
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("NP4M setup has invalid shell syntax: %v\n%s", err, out)
+		}
 	}
 }
 

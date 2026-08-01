@@ -282,7 +282,7 @@ func crushCmd(user, host, pass, config, script, label, agent string) tea.Cmd {
 		if err := sshMergeCrushConfig(host, u, pass, config); err != nil {
 			return notifyMsg("crush config write failed: " + err.Error())
 		}
-		cmd := loginShell("crush")
+		cmd := loginShell(crushOpenCommand)
 		if script != "" {
 			const remotePath = "~/.aidt-deploy.sh"
 			if err := uploadRemoteScript(host, u, pass, remotePath, script); err != nil {
