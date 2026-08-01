@@ -117,7 +117,7 @@ the first nine sections; `0` opens Update.
 | Pool | View, add, and remove Ollama endpoints from the Olla configuration. |
 | Models | List, pull, delete, warm, and select models across workers. |
 | Chat | Stream OpenAI-compatible chat responses with bounded session history and optional URL fetch context. |
-| Agents | Deploy and open the supported Crush and Hermes terminal agents. |
+| Agents | Deploy and open Crush, OpenCode, Goose, Grok Build, Claude Code, and Hermes. |
 | Load | Visualize per-worker request share and active connections. |
 | Nutanix | Configure Prism placement, deploy or delete VMs, and run custom deployments. |
 | Services | List gateway, worker, and custom-service URLs with direct clickable links. |
@@ -275,17 +275,33 @@ The current catalog contains:
 
 - **Crush**: installed on the gateway and configured to use the Olla OpenAI
   endpoint for the whole worker pool.
+- **OpenCode**: installed on the gateway with an AIDT-owned provider config that
+  selects Olla and the current default model.
+- **Goose**: installed on the gateway with an Olla custom provider using its
+  official OpenAI-compatible provider format.
+- **Grok Build**: installed on the gateway from xAI's official installer with
+  an isolated `GROK_HOME` that selects Olla by default.
+- **Claude Code**: installed on the gateway and launched through Olla's
+  Anthropic Messages API translator using the current default model.
 - **Hermes**: installed on a selected worker and configured to use Olla as a
   custom provider. Optional Telegram gateway settings are available.
 
 Press `d` in the Agents section to deploy the selected agent. Press `Enter` or
 `o` to open it over SSH. Removal uninstalls the selected agent from its
-registered hosts.
+registered hosts. Removing a gateway or worker VM through AIDT also clears any
+agent registrations on that host. If a host was already deleted externally,
+Remove still clears the stale registration and reports remote cleanup as
+unconfirmed.
 
 Crush normally inventories its current directory at startup to build project
 context. AIDT launches it in the dedicated
 `~/.ai-deployment-toolkit/crush-workspace` directory so it does not scan the
 directory from which AIDT was started.
+
+OpenCode, Goose, Grok Build, and Claude Code launch in
+`~/.ai-deployment-toolkit/agent-workspace`. AIDT stores their Olla provider
+configuration in mode-`0600` files so credentials are not exposed in
+long-lived SSH command arguments.
 
 ## Runtime State
 

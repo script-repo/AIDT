@@ -11,7 +11,8 @@ item must be addressed before using AIDT in a trusted lab environment.
 - `go test ./...` passes.
 - `go vet ./...` passes.
 - `python scripts/nutanix_olla_vm.py --help` loads successfully.
-- The active UI contains nine sections and supports the Crush and Hermes agents.
+- The active UI contains nine sections and supports Crush, OpenCode, Goose,
+  Grok Build, Claude Code, and Hermes.
 - The Go application is the operator-facing orchestrator; Python performs
   Nutanix mutations; shell scripts configure Linux guests.
 

@@ -254,13 +254,35 @@ func deployAgentCmd(user, host, pass, script, agent, label string) tea.Cmd {
 		if pass != "" {
 			_, _ = EnsureKeyAuth(host, u, pass)
 		}
-		const remotePath = "~/.aidt-deploy.sh"
+		const remotePath = "$HOME/.aidt-deploy.sh"
 		if err := uploadRemoteScript(host, u, pass, remotePath, script); err != nil {
 			return notifyMsg(label + " prep failed: " + err.Error())
 		}
 		return consoleReadyMsg{
 			user: u, host: host, key: managedKeyPath(),
-			cmd: "bash -l " + remotePath, label: label, agent: agent,
+			cmd: stagedScriptCommand(remotePath), label: label, agent: agent,
+		}
+	}
+}
+
+// configuredAgentCmd securely stages a short config-refresh-and-launch script.
+// Unlike deployment, ending the interactive session does not change registration.
+func configuredAgentCmd(user, host, pass, script, label string) tea.Cmd {
+	return func() tea.Msg {
+		u := orDefault(user, "rocky")
+		if host == "" {
+			return notifyMsg("no target host for " + label)
+		}
+		if pass != "" {
+			_, _ = EnsureKeyAuth(host, u, pass)
+		}
+		const remotePath = "$HOME/.aidt-agent-open.sh"
+		if err := uploadRemoteScript(host, u, pass, remotePath, script); err != nil {
+			return notifyMsg(label + " prep failed: " + err.Error())
+		}
+		return consoleReadyMsg{
+			user: u, host: host, key: managedKeyPath(),
+			cmd: stagedScriptCommand(remotePath), label: label,
 		}
 	}
 }
@@ -284,11 +306,11 @@ func crushCmd(user, host, pass, config, script, label, agent string) tea.Cmd {
 		}
 		cmd := loginShell(crushOpenCommand)
 		if script != "" {
-			const remotePath = "~/.aidt-deploy.sh"
+			const remotePath = "$HOME/.aidt-deploy.sh"
 			if err := uploadRemoteScript(host, u, pass, remotePath, script); err != nil {
 				return notifyMsg(label + " prep failed: " + err.Error())
 			}
-			cmd = "bash -l " + remotePath
+			cmd = stagedScriptCommand(remotePath)
 		}
 		return consoleReadyMsg{
 			user: u, host: host, key: managedKeyPath(),

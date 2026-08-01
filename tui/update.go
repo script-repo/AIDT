@@ -240,10 +240,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case agentRemovedMsg:
-		if len(msg.okHosts) > 0 {
+		forgetHosts := msg.attemptedHosts
+		if len(forgetHosts) == 0 {
+			forgetHosts = msg.okHosts
+		}
+		if len(forgetHosts) > 0 {
 			var kept []string
 			for _, h := range m.agentHosts[msg.agent] {
-				if !containsStr(msg.okHosts, h) {
+				if !containsStr(forgetHosts, h) {
 					kept = append(kept, h)
 				}
 			}
@@ -260,7 +264,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refreshAgents()
 		}
 		if len(msg.errs) > 0 {
-			m.notice = fmt.Sprintf("%s removed on %d host(s) — failed: %s", msg.agent, msg.removed, strings.Join(msg.errs, "; "))
+			m.notice = fmt.Sprintf("%s deregistered from %d host(s); remote uninstall succeeded on %d, cleanup unconfirmed: %s", msg.agent, len(forgetHosts), msg.removed, strings.Join(msg.errs, "; "))
 		} else {
 			m.notice = fmt.Sprintf("%s removed on %d host(s)", msg.agent, msg.removed)
 		}
@@ -1321,12 +1325,18 @@ func (m *model) startAgent(a agentDef, act, host string) tea.Cmd {
 		if a.name == "Crush" {
 			return localCrushCmd(m.crushConfigJSON(), "", a.name, "")
 		}
-		return localLaunchCmd(agentOpenCmd(a), a.name)
+		if config := m.agentConfigScript(a); config != "" {
+			return localConfiguredAgentCmd("set -e\n"+config+m.agentOpenCmd(a)+"\n", a.name)
+		}
+		return localLaunchCmd(m.agentOpenCmd(a), a.name)
 	}
 	if a.name == "Crush" {
 		return crushCmd(m.sshUser, host, m.sshPass, m.crushConfigJSON(), "", a.name, "")
 	}
-	return prepAgentCmd(m.sshUser, host, m.sshPass, agentOpenCmd(a), a.name)
+	if config := m.agentConfigScript(a); config != "" {
+		return configuredAgentCmd(m.sshUser, host, m.sshPass, "set -e\n"+config+m.agentOpenCmd(a)+"\n", a.name)
+	}
+	return prepAgentCmd(m.sshUser, host, m.sshPass, m.agentOpenCmd(a), a.name)
 }
 
 func (m *model) deleteSelectedVM() tea.Cmd {
@@ -1353,6 +1363,21 @@ func (m *model) deleteSelectedVM() tea.Cmd {
 				cmds = append(cmds, sshRemoveCmd(h, orDefault(m.sshUser, "rocky"), m.sshPass, ep))
 			}
 		}
+	}
+	m.pendingDeleteHosts = nil
+	addDeleteHost := func(host string) {
+		if host != "" && !containsStr(m.pendingDeleteHosts, host) {
+			m.pendingDeleteHosts = append(m.pendingDeleteHosts, host)
+		}
+	}
+	addDeleteHost(it.ip)
+	for _, e := range m.endpoints {
+		if e.Name == it.name || (it.ip != "" && hostFromURL(e.URL) == it.ip) {
+			addDeleteHost(hostFromURL(e.URL))
+		}
+	}
+	if it.role == "gateway" {
+		addDeleteHost(hostFromURL(m.gateway))
 	}
 	cmds = append(cmds, m.startProc([]string{"delete", "--name", it.name}, "delete "+it.name))
 	return tea.Batch(cmds...)
@@ -1596,6 +1621,8 @@ func (m model) handleProc(ev ProcEvent) (tea.Model, tea.Cmd) {
 		m.pendingCustom = nil
 		wasLocalOlla := m.localOllaPending
 		m.localOllaPending = false
+		deleteHosts := m.pendingDeleteHosts
+		m.pendingDeleteHosts = nil
 		if ev.Code == 0 {
 			m.logLines = append(m.logLines, "<<< done")
 			if custom != nil && custom.url != "" {
@@ -1614,6 +1641,9 @@ func (m model) handleProc(ev ProcEvent) (tea.Model, tea.Cmd) {
 				m.notice = custom.cfg.Name + " deployed successfully"
 			} else {
 				m.notice = "deploy/delete finished"
+			}
+			if forgotten := m.forgetAgentHost(deleteHosts...); len(forgotten) > 0 {
+				m.notice = fmt.Sprintf("VM deleted; deregistered %d agent(s): %s", len(forgotten), strings.Join(forgotten, ", "))
 			}
 		} else {
 			m.logLines = append(m.logLines, fmt.Sprintf("<<< failed (rc=%d)", ev.Code))

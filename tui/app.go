@@ -211,12 +211,13 @@ type model struct {
 	pullRows  []pullRow
 
 	// proc (deploy/delete)
-	procCh           chan ProcEvent
-	procBusy         bool
-	localOllaPending bool        // the running proc is a local Olla install; connect on success
-	probingLocal     bool        // startup probe for a local Olla is in flight; hold off the Connect form
-	batch            deployBatch // active multi-worker parallel deploy, if any
-	logLines         []string
+	procCh             chan ProcEvent
+	procBusy           bool
+	localOllaPending   bool        // the running proc is a local Olla install; connect on success
+	pendingDeleteHosts []string    // clear these host aliases after successful VM deletion
+	probingLocal       bool        // startup probe for a local Olla is in flight; hold off the Connect form
+	batch              deployBatch // active multi-worker parallel deploy, if any
+	logLines           []string
 
 	// access
 	token   string

@@ -77,6 +77,14 @@ func shSingle(s string) string {
 	return strings.ReplaceAll(s, "'", `'\''`)
 }
 
+func stagedScriptCommand(path string) string {
+	shellPath := path
+	if !strings.HasPrefix(path, "$HOME/") {
+		shellPath = "'" + shSingle(path) + "'"
+	}
+	return "bash -l " + shellPath + "; rc=$?; rm -f " + shellPath + "; exit $rc"
+}
+
 func errStr(err error) string {
 	if err == nil {
 		return ""

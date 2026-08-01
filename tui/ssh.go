@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net"
+	"os"
 	"strings"
 	"time"
 
@@ -22,9 +23,20 @@ type endpointEntry struct {
 }
 
 func dialSSH(host, user, password string) (*ssh.Client, error) {
+	var auth []ssh.AuthMethod
+	if keyPath := managedKeyPath(); keyPath != "" {
+		if key, err := os.ReadFile(keyPath); err == nil {
+			if signer, err := ssh.ParsePrivateKey(key); err == nil {
+				auth = append(auth, ssh.PublicKeys(signer))
+			}
+		}
+	}
+	if password != "" {
+		auth = append(auth, ssh.Password(password))
+	}
 	cfg := &ssh.ClientConfig{
 		User:            user,
-		Auth:            []ssh.AuthMethod{ssh.Password(password)},
+		Auth:            auth,
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 		Timeout:         20 * time.Second,
 	}
@@ -49,26 +61,33 @@ func readRemoteFile(client *ssh.Client, path string) (string, error) {
 	return runSSH(client, "cat "+path)
 }
 
-// sshWriteFile writes content to remotePath on host (base64-encoded so no shell
-// quoting is needed). If mkdir is non-empty that directory is created first; if
-// makeExec is true the file is chmod +x. Paths may use ~ (expanded remotely).
+// sshWriteFile streams content over SSH stdin so secrets never appear in process
+// arguments. Paths may use ~ (expanded remotely).
 func sshWriteFile(host, user, password, mkdir, remotePath, content string, makeExec bool) error {
 	client, err := dialSSH(host, user, password)
 	if err != nil {
 		return err
 	}
 	defer client.Close()
-	b64 := base64.StdEncoding.EncodeToString([]byte(content))
-	var cmd string
+	var cmd strings.Builder
+	cmd.WriteString("umask 077 && ")
 	if mkdir != "" {
-		cmd = "mkdir -p " + mkdir + " && "
+		cmd.WriteString("mkdir -p " + mkdir + " && ")
 	}
-	cmd += fmt.Sprintf("echo %s | base64 -d > %s", b64, remotePath)
+	cmd.WriteString("cat > " + remotePath)
 	if makeExec {
-		cmd += " && chmod +x " + remotePath
+		cmd.WriteString(" && chmod 700 " + remotePath)
+	} else {
+		cmd.WriteString(" && chmod 600 " + remotePath)
 	}
-	if out, err := runSSH(client, cmd); err != nil {
-		return fmt.Errorf("%v: %s", err, strings.TrimSpace(out))
+	sess, err := client.NewSession()
+	if err != nil {
+		return err
+	}
+	defer sess.Close()
+	sess.Stdin = strings.NewReader(content)
+	if out, err := sess.CombinedOutput(cmd.String()); err != nil {
+		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }

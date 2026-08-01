@@ -81,6 +81,39 @@ grep -q '.local/bin' "$HOME/.bashrc" 2>/dev/null || echo 'export PATH="$HOME/.lo
 grep -q '/usr/local/bin' "$HOME/.bashrc" 2>/dev/null || echo 'export PATH="/usr/local/bin:$PATH"' >> "$HOME/.bashrc"
 `
 
+// cliDepsBootstrap installs the small set of tools required by the official
+// standalone installers without pulling in Node.js for native CLIs.
+const cliDepsBootstrap = `echo "[deploy] ensuring CLI installer dependencies…"
+. /etc/os-release 2>/dev/null || true
+export PATH="/usr/local/bin:/usr/bin:$HOME/.local/bin:$HOME/.opencode/bin:$HOME/.grok/bin:$PATH"
+if [ "$(id -u)" -eq 0 ]; then
+  SUDO=""
+elif command -v sudo >/dev/null 2>&1; then
+  SUDO="sudo"
+else
+  echo "[deploy] ERROR: installation requires root or sudo for missing dependencies" >&2
+  exit 1
+fi
+case "${ID:-} ${ID_LIKE:-}" in
+  *ubuntu*|*debian*)
+    $SUDO apt-get update -y >/dev/null
+    $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl git tar gzip bzip2 unzip
+    ;;
+  *)
+    if command -v dnf >/dev/null 2>&1; then
+      $SUDO dnf install -y ca-certificates curl git tar gzip bzip2 unzip
+    elif command -v yum >/dev/null 2>&1; then
+      $SUDO yum install -y ca-certificates curl git tar gzip bzip2 unzip
+    else
+      echo "[deploy] ERROR: unsupported Linux package manager" >&2
+      exit 1
+    fi
+    ;;
+esac
+mkdir -p "$HOME/.local/bin" "$HOME/.config/aidt"
+grep -q '.local/bin' "$HOME/.bashrc" 2>/dev/null || echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
+`
+
 // crushDeployScript installs Crush from Charm's official package repository on
 // the Olla server. Deployment is intentionally non-interactive; opening Crush
 // is a separate action after a successful install has been registered.
@@ -151,10 +184,9 @@ const crushOpenCommand = `mkdir -p "$HOME/.ai-deployment-toolkit/crush-workspace
 //   - Crush runs on the Olla server and talks to the Olla OpenAI endpoint (so it
 //     load-balances across the whole worker pool). Installed from the Charm repo;
 //     its provider config is written to ~/.config/crush/crush.json.
-//   - OpenClaw and Hermes are deployed "by ollama" (ollama launch …) on a chosen
-//     worker, after git + Node + a user npm prefix are bootstrapped.
-//   - Nanoclaw runs as one or more Docker containers on a chosen worker (see
-//     nanoclaw.go), so multiple isolated instances can share the same VM.
+//   - OpenCode, Goose, Grok Build, and Claude Code run on the gateway and use
+//     Olla as their default model provider.
+//   - Hermes runs on a selected worker and uses Olla as a custom provider.
 var agentCatalog = []agentDef{
 	{
 		name:       "Crush",
@@ -165,6 +197,38 @@ var agentCatalog = []agentDef{
 		desc:       "Charm coding agent",
 	},
 	{
+		name:       "OpenCode",
+		cli:        "opencode",
+		deployable: true,
+		target:     "gateway",
+		endpoint:   "Olla OpenAI endpoint (whole pool)",
+		desc:       "Open-source coding agent",
+	},
+	{
+		name:       "Goose",
+		cli:        "goose session",
+		deployable: true,
+		target:     "gateway",
+		endpoint:   "Olla OpenAI endpoint (whole pool)",
+		desc:       "AAIF open-source AI agent",
+	},
+	{
+		name:       "Grok Build",
+		cli:        "grok",
+		deployable: true,
+		target:     "gateway",
+		endpoint:   "Olla OpenAI endpoint (whole pool)",
+		desc:       "xAI terminal coding agent",
+	},
+	{
+		name:       "Claude Code",
+		cli:        "claude",
+		deployable: true,
+		target:     "gateway",
+		endpoint:   "Olla Anthropic endpoint (whole pool)",
+		desc:       "Anthropic coding agent",
+	},
+	{
 		name:       "Hermes",
 		cli:        "hermes",
 		deployable: true,
@@ -173,6 +237,81 @@ var agentCatalog = []agentDef{
 		desc:       "Nous Research self-improving agent",
 	},
 }
+
+const openCodeInstallFragment = `echo "[deploy] installing/updating OpenCode from opencode.ai…"
+INSTALLER="$(mktemp)"
+curl -fsSL https://opencode.ai/install -o "$INSTALLER"
+bash "$INSTALLER"
+rm -f "$INSTALLER"
+export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$PATH"
+hash -r 2>/dev/null || true
+command -v opencode >/dev/null 2>&1 || { echo "[deploy] ERROR: opencode not found after install" >&2; exit 1; }
+echo "[deploy] OpenCode ready: $(command -v opencode)"
+`
+
+const gooseInstallFragment = `echo "[deploy] installing/updating Goose from the official AAIF release…"
+INSTALLER="$(mktemp)"
+curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh -o "$INSTALLER"
+CONFIGURE=false bash "$INSTALLER"
+rm -f "$INSTALLER"
+export PATH="$HOME/.local/bin:$PATH"
+hash -r 2>/dev/null || true
+command -v goose >/dev/null 2>&1 || { echo "[deploy] ERROR: goose not found after install" >&2; exit 1; }
+echo "[deploy] Goose ready: $(command -v goose)"
+`
+
+const grokInstallFragment = `echo "[deploy] installing/updating Grok Build from x.ai…"
+INSTALLER="$(mktemp)"
+curl -fsSL https://x.ai/cli/install.sh -o "$INSTALLER"
+bash "$INSTALLER"
+rm -f "$INSTALLER"
+export PATH="$HOME/.grok/bin:$HOME/.local/bin:$PATH"
+hash -r 2>/dev/null || true
+command -v grok >/dev/null 2>&1 || { echo "[deploy] ERROR: grok not found after install" >&2; exit 1; }
+echo "[deploy] Grok Build ready: $(command -v grok)"
+`
+
+const claudeCodeInstallFragment = `echo "[deploy] installing/updating Claude Code from claude.ai…"
+INSTALLER="$(mktemp)"
+curl -fsSL https://claude.ai/install.sh -o "$INSTALLER"
+bash "$INSTALLER"
+rm -f "$INSTALLER"
+export PATH="$HOME/.local/bin:$PATH"
+hash -r 2>/dev/null || true
+command -v claude >/dev/null 2>&1 || { echo "[deploy] ERROR: claude not found after install" >&2; exit 1; }
+echo "[deploy] Claude Code ready: $(command -v claude)"
+`
+
+const crushUpdateScript = `set -e
+export PATH="/usr/local/bin:/usr/bin:$HOME/.local/bin:$PATH"
+. /etc/os-release 2>/dev/null || true
+if [ "$(id -u)" -eq 0 ]; then SUDO=""; else SUDO="sudo"; fi
+case "${ID:-} ${ID_LIKE:-}" in
+  *ubuntu*|*debian*)
+    $SUDO apt-get update -y
+    $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y --only-upgrade crush
+    ;;
+  *)
+    if command -v dnf >/dev/null 2>&1; then
+      $SUDO dnf upgrade -y crush
+    else
+      $SUDO yum update -y crush
+    fi
+    ;;
+esac
+command -v crush >/dev/null 2>&1 || { echo "[update] ERROR: crush not found" >&2; exit 1; }
+echo "[update] Crush ready: $(crush --version 2>/dev/null || command -v crush)"
+`
+
+const hermesUpdateFragment = `export PATH="/usr/local/bin:$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
+echo "[update] installing latest Hermes from the official installer…"
+INSTALLER="$(mktemp)"
+curl -fsSL https://hermes-agent.nousresearch.com/install.sh -o "$INSTALLER"
+bash "$INSTALLER" --skip-setup
+rm -f "$INSTALLER"
+hash -r 2>/dev/null || true
+command -v hermes >/dev/null 2>&1 || { echo "[update] ERROR: hermes not found after update" >&2; exit 1; }
+`
 
 // hermesInstallFragment installs Hermes via the official Nous installer when
 // missing (--skip-setup so the wizard cannot hang a headless deploy). ollama
@@ -280,6 +419,42 @@ func (m *model) agentDeployScript(a agentDef) string {
 		}
 		return b.String()
 	}
+	if a.name == "OpenCode" {
+		b.Reset()
+		b.WriteString("set -e\n")
+		b.WriteString(cliDepsBootstrap)
+		b.WriteString(openCodeInstallFragment)
+		b.WriteString(m.agentConfigScript(a))
+		b.WriteString("echo \"[deploy] OpenCode installed and pointed at Olla. Open it from Agents (enter).\"\n")
+		return b.String()
+	}
+	if a.name == "Goose" {
+		b.Reset()
+		b.WriteString("set -e\n")
+		b.WriteString(cliDepsBootstrap)
+		b.WriteString(gooseInstallFragment)
+		b.WriteString(m.agentConfigScript(a))
+		b.WriteString("echo \"[deploy] Goose installed and pointed at Olla. Open it from Agents (enter).\"\n")
+		return b.String()
+	}
+	if a.name == "Grok Build" {
+		b.Reset()
+		b.WriteString("set -e\n")
+		b.WriteString(cliDepsBootstrap)
+		b.WriteString(grokInstallFragment)
+		b.WriteString(m.agentConfigScript(a))
+		b.WriteString("echo \"[deploy] Grok Build installed and pointed at Olla. Open it from Agents (enter).\"\n")
+		return b.String()
+	}
+	if a.name == "Claude Code" {
+		b.Reset()
+		b.WriteString("set -e\n")
+		b.WriteString(cliDepsBootstrap)
+		b.WriteString(claudeCodeInstallFragment)
+		b.WriteString(m.agentConfigScript(a))
+		b.WriteString("echo \"[deploy] Claude Code installed. AIDT will open it through Olla's Anthropic endpoint.\"\n")
+		return b.String()
+	}
 	if a.name == "OpenClaw" {
 		b.WriteString(strings.ReplaceAll(openclawInstallFragment, "__OPENCLAW_MODEL__", model))
 		b.WriteString("echo \"[deploy] OpenClaw installed. Open it from Agents (enter) to chat / onboard.\"\n")
@@ -295,6 +470,33 @@ func (m *model) agentDeployScript(a agentDef) string {
 	b.WriteString("  exit 1\nfi\n")
 	b.WriteString(fmt.Sprintf("echo \"[deploy] %s ready: $(command -v %s)\"\n", a.cli, a.cli))
 	return b.String()
+}
+
+func (m *model) agentConfigScript(a agentDef) string {
+	model := m.effDefaultModel()
+	switch a.name {
+	case "OpenCode":
+		return m.openCodeConfigScript(model)
+	case "Goose":
+		return m.gooseConfigScript(model)
+	case "Grok Build":
+		return m.grokConfigScript(model)
+	case "Claude Code":
+		return m.claudeCodeConfigScript(model)
+	default:
+		return ""
+	}
+}
+
+func (m *model) agentUpdateScript(a agentDef) string {
+	switch a.name {
+	case "Crush":
+		return crushUpdateScript
+	case "Hermes":
+		return "set -e\nexport HERMES_NONINTERACTIVE=1\n" + depsBootstrap + hermesUpdateFragment + m.hermesOllaConfigScript(m.effDefaultModel())
+	default:
+		return m.agentDeployScript(a)
+	}
 }
 
 // hermesGatewayWanted reports whether a Hermes deploy should also set up the
@@ -399,7 +601,149 @@ func (m *model) hermesOllaConfigScript(model string) string {
 PY="$HOME/.hermes/hermes-agent/venv/bin/python"; [ -x "$PY" ] || PY=python3
 echo %s | base64 -d > /tmp/aidt-hermes-olla.py
 OLLA_BASE='%s' OLLA_KEY='%s' OLLA_MODEL='%s' "$PY" /tmp/aidt-hermes-olla.py
-`, base, b64, base, key, model)
+`, base, b64, shSingle(base), shSingle(key), shSingle(model))
+}
+
+// openCodeConfigScript writes an AIDT-owned configuration and leaves any normal
+// OpenCode config untouched. OPENCODE_CONFIG selects it when AIDT launches the
+// agent. The mode-0600 file stores the same Olla token AIDT persists locally.
+func (m *model) openCodeConfigScript(defaultModel string) string {
+	models := map[string]any{}
+	add := func(name string) {
+		if strings.TrimSpace(name) != "" {
+			models[name] = map[string]any{"name": name}
+		}
+	}
+	add(defaultModel)
+	for _, md := range m.models {
+		add(md.Name)
+	}
+	cfg := map[string]any{
+		"$schema": "https://opencode.ai/config.json",
+		"model":   "olla/" + defaultModel,
+		"provider": map[string]any{
+			"olla": map[string]any{
+				"npm":  "@ai-sdk/openai-compatible",
+				"name": "Olla",
+				"options": map[string]any{
+					"baseURL": strings.TrimRight(m.gateway, "/") + "/olla/openai/v1",
+					"apiKey":  orDefault(m.token, "olla"),
+				},
+				"models": models,
+			},
+		},
+	}
+	b, _ := json.MarshalIndent(cfg, "", "  ")
+	encoded := base64.StdEncoding.EncodeToString(b)
+	return fmt.Sprintf(`echo "[deploy] writing AIDT OpenCode configuration…"
+(
+umask 077
+mkdir -p "$HOME/.config/aidt"
+echo %s | base64 -d > "$HOME/.config/aidt/opencode.json"
+chmod 600 "$HOME/.config/aidt/opencode.json"
+)
+`, encoded)
+}
+
+// gooseConfigScript registers a named OpenAI-compatible provider using Goose's
+// documented custom-provider format. A separate mode-0600 env file supplies
+// the API key without putting it in the provider JSON or launch argv.
+func (m *model) gooseConfigScript(defaultModel string) string {
+	models := []map[string]any{}
+	seen := map[string]bool{}
+	add := func(name string) {
+		if strings.TrimSpace(name) != "" && !seen[name] {
+			seen[name] = true
+			models = append(models, map[string]any{"name": name, "context_limit": 128000})
+		}
+	}
+	add(defaultModel)
+	for _, md := range m.models {
+		add(md.Name)
+	}
+	cfg := map[string]any{
+		"name":               "olla",
+		"engine":             "openai",
+		"display_name":       "Olla",
+		"description":        "AIDT Olla gateway",
+		"api_key_env":        "OLLA_API_KEY",
+		"base_url":           strings.TrimRight(m.gateway, "/") + "/olla/openai/v1/chat/completions",
+		"models":             models,
+		"supports_streaming": true,
+		"requires_auth":      true,
+	}
+	b, _ := json.MarshalIndent(cfg, "", "  ")
+	encoded := base64.StdEncoding.EncodeToString(b)
+	env := fmt.Sprintf("export OLLA_API_KEY='%s'\n", shSingle(orDefault(m.token, "olla")))
+	envEncoded := base64.StdEncoding.EncodeToString([]byte(env))
+	return fmt.Sprintf(`echo "[deploy] writing Olla provider for Goose…"
+(
+umask 077
+mkdir -p "$HOME/.config/goose/custom_providers"
+echo %s | base64 -d > "$HOME/.config/goose/custom_providers/olla.json"
+chmod 600 "$HOME/.config/goose/custom_providers/olla.json"
+echo %s | base64 -d > "$HOME/.config/aidt/goose.env"
+chmod 600 "$HOME/.config/aidt/goose.env"
+)
+`, encoded, envEncoded)
+}
+
+// grokConfigScript creates a separate GROK_HOME for AIDT so selecting Grok
+// Build does not overwrite a user's normal Grok configuration.
+func (m *model) grokConfigScript(model string) string {
+	base := strings.TrimRight(m.gateway, "/") + "/olla/openai/v1"
+	quote := func(s string) string {
+		b, _ := json.Marshal(s)
+		return string(b)
+	}
+	config := fmt.Sprintf(`[model.olla]
+model = %s
+base_url = %s
+name = "Olla"
+api_key = %s
+api_backend = "chat_completions"
+
+[models]
+default = "olla"
+`, quote(model), quote(base), quote(orDefault(m.token, "olla")))
+	encoded := base64.StdEncoding.EncodeToString([]byte(config))
+	return fmt.Sprintf(`echo "[deploy] writing AIDT Grok Build configuration…"
+(
+umask 077
+mkdir -p "$HOME/.config/aidt/grok"
+echo %s | base64 -d > "$HOME/.config/aidt/grok/config.toml"
+chmod 600 "$HOME/.config/aidt/grok/config.toml"
+)
+`, encoded)
+}
+
+// claudeCodeConfigScript stores the documented Olla environment in a protected
+// AIDT env file. Sourcing it at launch keeps credentials out of ssh argv.
+func (m *model) claudeCodeConfigScript(model string) string {
+	base := strings.TrimRight(m.gateway, "/") + "/olla/anthropic"
+	key := orDefault(m.token, "olla")
+	var env strings.Builder
+	for _, item := range []struct{ name, value string }{
+		{"ANTHROPIC_BASE_URL", base},
+		{"ANTHROPIC_AUTH_TOKEN", key},
+		{"ANTHROPIC_MODEL", model},
+		{"ANTHROPIC_DEFAULT_HAIKU_MODEL", model},
+		{"ANTHROPIC_DEFAULT_SONNET_MODEL", model},
+		{"ANTHROPIC_DEFAULT_OPUS_MODEL", model},
+		{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"},
+		{"API_TIMEOUT_MS", "3000000"},
+	} {
+		fmt.Fprintf(&env, "export %s='%s'\n", item.name, shSingle(item.value))
+	}
+	encoded := base64.StdEncoding.EncodeToString([]byte(env.String()))
+	return fmt.Sprintf(`echo "[deploy] writing AIDT Claude Code environment…"
+(
+umask 077
+mkdir -p "$HOME/.config/aidt"
+echo %s | base64 -d > "$HOME/.config/aidt/claude-code.env"
+chmod 600 "$HOME/.config/aidt/claude-code.env"
+)
+`, encoded)
 }
 
 // agentUninstallScript returns the shell that removes an agent install from a
@@ -431,25 +775,74 @@ rm -f "$HOME/.local/bin/hermes" "$HOME/.npm-global/bin/hermes"
 rm -rf "$HOME/.hermes"
 echo "[remove] hermes removed"
 `
+	case "OpenCode":
+		return `echo "[remove] uninstalling opencode…"
+rm -f "$HOME/.local/bin/opencode" "$HOME/.opencode/bin/opencode"
+rm -rf "$HOME/.opencode" "$HOME/.config/aidt/opencode.json"
+echo "[remove] OpenCode removed"
+`
+	case "Goose":
+		return `echo "[remove] uninstalling goose…"
+rm -f "$HOME/.local/bin/goose"
+rm -f "$HOME/.config/goose/custom_providers/olla.json"
+rm -f "$HOME/.config/aidt/goose.env"
+echo "[remove] Goose removed"
+`
+	case "Grok Build":
+		return `echo "[remove] uninstalling Grok Build…"
+for LINK in "$HOME/.local/bin/grok" "$HOME/.local/bin/agent"; do
+  case "$(readlink "$LINK" 2>/dev/null || true)" in
+    *"/.grok/bin/grok"|*"/.grok/bin/agent") rm -f "$LINK" ;;
+  esac
+done
+rm -f "$HOME/.grok/bin/grok" "$HOME/.grok/bin/agent"
+rm -rf "$HOME/.grok/downloads" "$HOME/.grok/completions" "$HOME/.config/aidt/grok"
+echo "[remove] Grok Build removed (user auth and settings kept in ~/.grok)"
+`
+	case "Claude Code":
+		return `echo "[remove] uninstalling Claude Code…"
+rm -f "$HOME/.local/bin/claude"
+rm -rf "$HOME/.local/share/claude"
+rm -f "$HOME/.config/aidt/claude-code.env"
+echo "[remove] Claude Code removed (user settings kept in ~/.claude)"
+`
 	}
 	return ""
 }
 
-// agentOpenCmd is the remote/login command "open" launches for an agent. Most
-// agents just relaunch their CLI; OmniRoute is a background service, so opening
-// it prints its dashboard URL and follows the container logs instead.
-func agentOpenCmd(a agentDef) string {
-	return loginShell(a.cli)
+// agentOpenCmd launches each CLI with Olla selected and in a dedicated workspace.
+// AIDT-owned mode-0600 files keep credentials out of long-lived ssh argv.
+func (m *model) agentOpenCmd(a agentDef) string {
+	model := m.effDefaultModel()
+	workspace := `mkdir -p "$HOME/.ai-deployment-toolkit/agent-workspace" && cd "$HOME/.ai-deployment-toolkit/agent-workspace" && `
+
+	var cmd string
+	switch a.name {
+	case "Crush":
+		cmd = crushOpenCommand
+	case "OpenCode":
+		cmd = fmt.Sprintf("export OPENCODE_CONFIG=\"$HOME/.config/aidt/opencode.json\"; %sexec opencode", workspace)
+	case "Goose":
+		cmd = fmt.Sprintf(". \"$HOME/.config/aidt/goose.env\"; export GOOSE_PROVIDER=olla GOOSE_MODEL='%s'; %sexec goose session", shSingle(model), workspace)
+	case "Grok Build":
+		cmd = fmt.Sprintf("export GROK_HOME=\"$HOME/.config/aidt/grok\"; %sexec grok", workspace)
+	case "Claude Code":
+		cmd = fmt.Sprintf(". \"$HOME/.config/aidt/claude-code.env\"; %sexec claude", workspace)
+	default:
+		cmd = a.cli
+	}
+	return loginShell(cmd)
 }
 
 // agentRemovedMsg reports the outcome of removing an agent's deployment(s):
 // per-host uninstalls for host agents, or container deletions for Nanoclaw.
 type agentRemovedMsg struct {
-	agent     string
-	container bool
-	removed   int      // uninstalled hosts, or deleted containers
-	okHosts   []string // hosts whose uninstall succeeded (host agents)
-	errs      []string
+	agent          string
+	container      bool
+	removed        int      // uninstalled hosts, or deleted containers
+	attemptedHosts []string // selected hosts to forget, even if remote cleanup failed
+	okHosts        []string // hosts whose uninstall succeeded (host agents)
+	errs           []string
 }
 
 // agentUninstallCmd runs an agent's uninstall script on every listed host in
@@ -460,7 +853,7 @@ func agentUninstallCmd(a agentDef, hosts []string, user, pass string) tea.Cmd {
 		return func() tea.Msg { return notifyMsg(a.name + " has no uninstall routine") }
 	}
 	return func() tea.Msg {
-		msg := agentRemovedMsg{agent: a.name}
+		msg := agentRemovedMsg{agent: a.name, attemptedHosts: append([]string(nil), hosts...)}
 		var mu sync.Mutex
 		var wg sync.WaitGroup
 		for _, h := range hosts {
@@ -494,6 +887,7 @@ func agentUninstallCmd(a agentDef, hosts []string, user, pass string) tea.Cmd {
 			}(h)
 		}
 		wg.Wait()
+		sort.Strings(msg.attemptedHosts)
 		sort.Strings(msg.okHosts)
 		sort.Strings(msg.errs)
 		msg.removed = len(msg.okHosts)
@@ -508,6 +902,56 @@ func agentByName(name string) (agentDef, bool) {
 		}
 	}
 	return agentDef{}, false
+}
+
+// forgetAgentHost removes every agent registration that points at any alias of
+// a deleted machine. It returns the affected agent names for user-facing status.
+func (m *model) forgetAgentHost(hosts ...string) []string {
+	remove := map[string]bool{}
+	for _, host := range hosts {
+		if host != "" {
+			remove[host] = true
+		}
+	}
+	if len(remove) == 0 {
+		return nil
+	}
+	var forgotten []string
+	seen := map[string]bool{}
+	for agent, hosts := range m.agentHosts {
+		var kept []string
+		for _, h := range hosts {
+			if !remove[h] {
+				kept = append(kept, h)
+			}
+		}
+		if len(kept) == len(hosts) {
+			continue
+		}
+		seen[agent] = true
+		forgotten = append(forgotten, agent)
+		if len(kept) == 0 {
+			delete(m.agentHosts, agent)
+			delete(m.agentReg, agent)
+			continue
+		}
+		m.agentHosts[agent] = kept
+		if remove[m.agentReg[agent]] {
+			m.agentReg[agent] = kept[0]
+		}
+	}
+	for agent, h := range m.agentReg {
+		if remove[h] && !seen[agent] {
+			forgotten = append(forgotten, agent)
+			delete(m.agentReg, agent)
+		}
+	}
+	if len(forgotten) > 0 {
+		sort.Strings(forgotten)
+		_ = saveAgentReg(m.tokFile, m.agentReg, m.agentHosts)
+		m.refreshAgents()
+	}
+	return forgotten
 }
 
 // agentHost resolves a default host for an agent: the gateway (Olla server) for
@@ -529,7 +973,8 @@ func (m *model) agentHost(a agentDef) string {
 func loginShell(cmd string) string {
 	// Prepend common install dirs inside the login shell too — some images'
 	// .bash_profile never sources .bashrc, so npm-global/local bins stay hidden.
-	return "bash -lc 'export PATH=\"/usr/local/bin:$HOME/.local/bin:$HOME/.npm-global/bin:$PATH\"; " + cmd + "'"
+	inner := `export PATH="/usr/local/bin:$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.opencode/bin:$HOME/.grok/bin:$PATH"; ` + cmd
+	return "bash -lc '" + shSingle(inner) + "'"
 }
 
 // crushConfigJSON builds a crush.json that registers the Olla gateway as an

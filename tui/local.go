@@ -52,7 +52,10 @@ func localWriteScript(path, content string) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(abs, []byte(content), 0o755); err != nil {
+	if err := os.WriteFile(abs, []byte(content), 0o700); err != nil {
+		return "", err
+	}
+	if err := os.Chmod(abs, 0o700); err != nil {
 		return "", err
 	}
 	return abs, nil
@@ -110,7 +113,7 @@ func localCrushCmd(config, script, label, agent string) tea.Cmd {
 			if err != nil {
 				return notifyMsg(label + " prep failed: " + err.Error())
 			}
-			cmd = "bash -l " + abs
+			cmd = stagedScriptCommand(abs)
 		}
 		return consoleReadyMsg{local: true, host: primaryIP(), cmd: cmd, label: label, agent: agent}
 	}
@@ -124,7 +127,17 @@ func localDeployAgentCmd(script, agent, label string) tea.Cmd {
 		if err != nil {
 			return notifyMsg(label + " prep failed: " + err.Error())
 		}
-		return consoleReadyMsg{local: true, host: primaryIP(), cmd: "bash -l " + abs, label: label, agent: agent}
+		return consoleReadyMsg{local: true, host: primaryIP(), cmd: stagedScriptCommand(abs), label: label, agent: agent}
+	}
+}
+
+func localConfiguredAgentCmd(script, label string) tea.Cmd {
+	return func() tea.Msg {
+		abs, err := localWriteScript("~/.aidt-agent-open.sh", script)
+		if err != nil {
+			return notifyMsg(label + " prep failed: " + err.Error())
+		}
+		return consoleReadyMsg{local: true, host: primaryIP(), cmd: stagedScriptCommand(abs), label: label}
 	}
 }
 

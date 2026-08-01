@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -351,22 +350,23 @@ func localStepCmd(script string, sudo bool) *exec.Cmd {
 	if runtime.GOOS == "windows" {
 		return exec.Command("powershell", "-NoProfile", "-Command", script)
 	}
+	var cmd *exec.Cmd
 	if sudo && os.Geteuid() != 0 {
-		return exec.Command("sudo", "-n", "bash", "-lc", script)
+		cmd = exec.Command("sudo", "-n", "bash", "-s")
+	} else {
+		cmd = exec.Command("bash", "-l", "-s")
 	}
-	return exec.Command("bash", "-lc", script)
+	cmd.Stdin = strings.NewReader(script)
+	return cmd
 }
 
-// sshStepCmd runs a script on a remote host over SSH. The script is base64-piped
-// to the remote shell so no quoting is needed. BatchMode avoids password prompts
-// (we rely on the managed key); sudo escalates the whole script to root.
+// sshStepCmd streams a script over SSH stdin so script contents and credentials
+// do not appear in process arguments. BatchMode relies on the managed key.
 func sshStepCmd(user, host, keyPath, script string, sudo bool) *exec.Cmd {
-	b64 := base64.StdEncoding.EncodeToString([]byte(script))
 	sh := "bash -l -s"
 	if sudo {
 		sh = "sudo -n bash -s"
 	}
-	remote := "echo " + b64 + " | base64 -d | " + sh
 	args := []string{
 		"-o", "StrictHostKeyChecking=no",
 		"-o", "UserKnownHostsFile=" + osNull(),
@@ -375,8 +375,10 @@ func sshStepCmd(user, host, keyPath, script string, sudo bool) *exec.Cmd {
 	if keyPath != "" {
 		args = append(args, "-i", keyPath, "-o", "IdentitiesOnly=yes")
 	}
-	args = append(args, fmt.Sprintf("%s@%s", orDefault(user, "rocky"), host), remote)
-	return exec.Command("ssh", args...)
+	args = append(args, fmt.Sprintf("%s@%s", orDefault(user, "rocky"), host), sh)
+	cmd := exec.Command("ssh", args...)
+	cmd.Stdin = strings.NewReader(script)
+	return cmd
 }
 
 // RunUpdatePlan executes each step in order, streaming output into ch with a

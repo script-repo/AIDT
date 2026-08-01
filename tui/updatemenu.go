@@ -5,7 +5,6 @@ import (
 	"os"
 	"runtime"
 	"strconv"
-	"strings"
 
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
@@ -43,7 +42,7 @@ func (m *model) refreshUpdateList() {
 	items := []list.Item{
 		updateItem{"Update local machine", "download + run the latest installer for this OS", uaLocal},
 		updateItem{"Update gateway (Olla)", "ssh to the gateway and reinstall the latest Olla", uaGateway},
-		updateItem{"Update agents", "upgrade Crush and Hermes", uaAgents},
+		updateItem{"Update agents", "upgrade registered terminal agents", uaAgents},
 		updateItem{"Update image", "change the image used for new deployments", uaImage},
 		updateItem{"Update OS", "pick hosts, then run OS package updates over ssh", uaOS},
 		updateItem{"Update all", "OS + agents + Olla + Ollama on every managed host", uaAll},
@@ -180,30 +179,11 @@ func (m *model) updateGatewayPlan() tea.Cmd {
 	return m.startUpdatePlan([]updateStep{step}, "update gateway (Olla)")
 }
 
-// updateAgentsPlan upgrades Crush and Hermes on their registered hosts.
+// updateAgentsPlan upgrades the terminal agents on their registered hosts.
 func (m *model) updateAgentsPlan() tea.Cmd {
-	user := orDefault(m.sshUser, "rocky")
-	model := m.effDefaultModel()
-	var steps []updateStep
-
-	if host := orDefault(m.agentReg["Crush"], hostFromURL(m.gateway)); host != "" {
-		steps = append(steps, updateStep{
-			title: "Update Crush on " + host, host: host, user: user, pass: m.sshPass,
-			sudo:   true,
-			script: "echo '[update] upgrading crush'\ndnf -y upgrade crush || dnf -y install crush",
-		})
-	}
-	if host := orDefault(m.agentReg["Hermes"], m.firstWorkerHost()); host != "" {
-		script := "set -e\nexport HERMES_NONINTERACTIVE=1\n" + depsBootstrap +
-			strings.ReplaceAll(hermesInstallFragment, "__HERMES_MODEL__", model) +
-			m.hermesOllaConfigScript(model) +
-			"echo '[update] Hermes updated and pointed at Olla'\n"
-		steps = append(steps, updateStep{
-			title: "Update Hermes on " + host, host: host, user: user, pass: m.sshPass, script: script,
-		})
-	}
+	steps := m.updateAgentsSteps()
 	if len(steps) == 0 {
-		m.notice = "no agent hosts known — connect and refresh the pool first"
+		m.notice = "no agent hosts known - deploy an agent first"
 		return nil
 	}
 	return m.startUpdatePlan(steps, "update agents")
@@ -272,21 +252,18 @@ func (m *model) updateAllPlan() []updateStep {
 // "Update all" can fold them into one plan).
 func (m *model) updateAgentsSteps() []updateStep {
 	user := orDefault(m.sshUser, "rocky")
-	model := m.effDefaultModel()
 	var steps []updateStep
-	if host := orDefault(m.agentReg["Crush"], hostFromURL(m.gateway)); host != "" {
-		steps = append(steps, updateStep{
-			title: "Update Crush on " + host, host: host, user: user, pass: m.sshPass, sudo: true,
-			script: "echo '[update] upgrading crush'\ndnf -y upgrade crush || dnf -y install crush",
-		})
-	}
-	if host := orDefault(m.agentReg["Hermes"], m.firstWorkerHost()); host != "" {
-		script := "set -e\nexport HERMES_NONINTERACTIVE=1\n" + depsBootstrap +
-			strings.ReplaceAll(hermesInstallFragment, "__HERMES_MODEL__", model) +
-			m.hermesOllaConfigScript(model)
-		steps = append(steps, updateStep{
-			title: "Update Hermes on " + host, host: host, user: user, pass: m.sshPass, script: script,
-		})
+	for _, a := range agentCatalog {
+		for _, host := range m.agentDeployedHosts(a.name) {
+			steps = append(steps, updateStep{
+				title:  "Update " + a.name + " on " + host,
+				host:   host,
+				user:   user,
+				pass:   m.sshPass,
+				local:  isLocalHost(host),
+				script: m.agentUpdateScript(a),
+			})
+		}
 	}
 	return steps
 }
