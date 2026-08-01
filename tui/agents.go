@@ -114,6 +114,73 @@ mkdir -p "$HOME/.local/bin" "$HOME/.config/aidt"
 grep -q '.local/bin' "$HOME/.bashrc" 2>/dev/null || echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
 `
 
+// obsidianBootstrap installs the official Obsidian AppImage when needed and
+// creates the shared vault that every deployed agent uses as its workspace.
+const obsidianBootstrap = `echo "[deploy] checking Obsidian..."
+export PATH="$HOME/.local/bin:$PATH"
+export AIDT_AGENT_VAULT="$HOME/Obsidian/AIDT-Agent-Vault"
+mkdir -p "$AIDT_AGENT_VAULT/.obsidian" "$HOME/.local/bin"
+if command -v obsidian >/dev/null 2>&1; then
+  echo "[deploy] Obsidian ready: $(command -v obsidian)"
+else
+  echo "[deploy] Obsidian not found; installing the official AppImage..."
+  . /etc/os-release 2>/dev/null || true
+  if [ "$(id -u)" -eq 0 ]; then
+    SUDO=""
+  elif command -v sudo >/dev/null 2>&1; then
+    SUDO="sudo"
+  else
+    echo "[deploy] ERROR: Obsidian installation requires root or sudo" >&2
+    exit 1
+  fi
+  if ! command -v curl >/dev/null 2>&1; then
+    case "${ID:-} ${ID_LIKE:-}" in
+      *ubuntu*|*debian*)
+        $SUDO apt-get update -y >/dev/null
+        $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl
+        ;;
+      *)
+        if command -v dnf >/dev/null 2>&1; then
+          $SUDO dnf install -y ca-certificates curl
+        elif command -v yum >/dev/null 2>&1; then
+          $SUDO yum install -y ca-certificates curl
+        else
+          echo "[deploy] ERROR: unsupported Linux package manager" >&2
+          exit 1
+        fi
+        ;;
+    esac
+  fi
+  OBSIDIAN_META="$(mktemp)"
+  curl -fsSL https://api.github.com/repos/obsidianmd/obsidian-releases/releases/latest -o "$OBSIDIAN_META"
+  OBSIDIAN_VERSION="$(sed -n 's/.*"tag_name":[[:space:]]*"v\([^"]*\)".*/\1/p' "$OBSIDIAN_META" | head -1)"
+  rm -f "$OBSIDIAN_META"
+  [ -n "$OBSIDIAN_VERSION" ] || { echo "[deploy] ERROR: could not resolve the latest Obsidian version" >&2; exit 1; }
+  case "$(uname -m)" in
+    x86_64|amd64)
+      OBSIDIAN_ASSET="Obsidian-$OBSIDIAN_VERSION.AppImage"
+      ;;
+    aarch64|arm64)
+      OBSIDIAN_ASSET="Obsidian-$OBSIDIAN_VERSION-arm64.AppImage"
+      ;;
+    *)
+      echo "[deploy] ERROR: unsupported Obsidian architecture: $(uname -m)" >&2
+      exit 1
+      ;;
+  esac
+  OBSIDIAN_URL="https://github.com/obsidianmd/obsidian-releases/releases/download/v$OBSIDIAN_VERSION/$OBSIDIAN_ASSET"
+  OBSIDIAN_TMP="$(mktemp)"
+  curl -fsSL "$OBSIDIAN_URL" -o "$OBSIDIAN_TMP"
+  [ -s "$OBSIDIAN_TMP" ] || { rm -f "$OBSIDIAN_TMP"; echo "[deploy] ERROR: Obsidian download was empty" >&2; exit 1; }
+  mv "$OBSIDIAN_TMP" "$HOME/.local/bin/obsidian"
+  chmod 0755 "$HOME/.local/bin/obsidian"
+  hash -r 2>/dev/null || true
+  command -v obsidian >/dev/null 2>&1 || { echo "[deploy] ERROR: obsidian not found after install" >&2; exit 1; }
+  echo "[deploy] Obsidian ready: $(command -v obsidian)"
+fi
+echo "[deploy] agent vault: $AIDT_AGENT_VAULT"
+`
+
 // crushDeployScript installs Crush from Charm's official package repository on
 // the Olla server. Deployment is intentionally non-interactive; opening Crush
 // is a separate action after a successful install has been registered.
@@ -174,10 +241,9 @@ echo "[deploy] Crush ready: $CRUSH_BIN"
 echo "[deploy] Open Crush from Agents (enter/o)."
 `
 
-// crushOpenCommand gives Crush a stable, empty workspace instead of inheriting
-// the directory AIDT happened to be launched from. Crush inventories its current
-// workspace on startup to build project context.
-const crushOpenCommand = `mkdir -p "$HOME/.ai-deployment-toolkit/crush-workspace" && cd "$HOME/.ai-deployment-toolkit/crush-workspace" && exec crush`
+// crushOpenCommand keeps Crush in the managed Obsidian vault instead of the
+// directory AIDT happened to be launched from.
+const crushOpenCommand = `mkdir -p "$HOME/Obsidian/AIDT-Agent-Vault/.obsidian" && cd "$HOME/Obsidian/AIDT-Agent-Vault" && exec crush`
 
 // agentCatalog is the set of agents offered in the Agents section.
 //
@@ -223,6 +289,14 @@ var agentCatalog = []agentDef{
 		target:     "worker",
 		endpoint:   "Olla Anthropic endpoint (whole pool)",
 		desc:       "Anthropic coding agent",
+	},
+	{
+		name:       "Codex",
+		cli:        "codex",
+		deployable: true,
+		target:     "worker",
+		endpoint:   "Olla OpenAI endpoint (whole pool)",
+		desc:       "OpenAI terminal coding agent",
 	},
 	{
 		name:       "Hermes",
@@ -276,6 +350,66 @@ export PATH="$HOME/.local/bin:$PATH"
 hash -r 2>/dev/null || true
 command -v claude >/dev/null 2>&1 || { echo "[deploy] ERROR: claude not found after install" >&2; exit 1; }
 echo "[deploy] Claude Code ready: $(command -v claude)"
+`
+
+const codexInstallFragment = `echo "[deploy] installing/updating Codex from OpenAI..."
+INSTALLER="$(mktemp)"
+curl -fsSL https://chatgpt.com/codex/install.sh -o "$INSTALLER"
+bash "$INSTALLER"
+rm -f "$INSTALLER"
+export PATH="$HOME/.local/bin:$HOME/.codex/bin:$PATH"
+hash -r 2>/dev/null || true
+command -v codex >/dev/null 2>&1 || { echo "[deploy] ERROR: codex not found after install" >&2; exit 1; }
+echo "[deploy] Codex ready: $(command -v codex)"
+`
+
+const openCodeServerFragment = `echo "[deploy] configuring OpenCode server on port 4096..."
+OPENCODE_BIN="$(command -v opencode)"
+OPENCODE_USER="$(id -un)"
+OPENCODE_HOME="$HOME"
+if [ "$(id -u)" -eq 0 ]; then SUDO=""; else SUDO="sudo"; fi
+cat <<EOF | $SUDO tee /etc/systemd/system/aidt-opencode.service >/dev/null
+[Unit]
+Description=AIDT OpenCode server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=$OPENCODE_USER
+Environment=HOME=$OPENCODE_HOME
+Environment=OPENCODE_CONFIG=$OPENCODE_HOME/.config/aidt/opencode.json
+Environment=PATH=/usr/local/bin:/usr/bin:$OPENCODE_HOME/.local/bin:$OPENCODE_HOME/.npm-global/bin:$OPENCODE_HOME/.opencode/bin
+EnvironmentFile=$OPENCODE_HOME/.config/aidt/opencode-server.env
+WorkingDirectory=$OPENCODE_HOME/Obsidian/AIDT-Agent-Vault
+ExecStart=$OPENCODE_BIN serve --hostname 0.0.0.0 --port 4096
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+set -a
+. "$OPENCODE_HOME/.config/aidt/opencode-server.env"
+set +a
+$SUDO systemctl daemon-reload
+$SUDO systemctl enable aidt-opencode.service >/dev/null
+$SUDO systemctl restart aidt-opencode.service
+if command -v firewall-cmd >/dev/null 2>&1 && $SUDO firewall-cmd --state >/dev/null 2>&1; then
+  $SUDO firewall-cmd --permanent --add-port=4096/tcp >/dev/null
+  $SUDO firewall-cmd --reload >/dev/null
+fi
+OPENCODE_READY=0
+for _ in $(seq 1 20); do
+  if curl -fsS -u "$OPENCODE_SERVER_USERNAME:$OPENCODE_SERVER_PASSWORD" http://127.0.0.1:4096/global/health >/dev/null 2>&1; then OPENCODE_READY=1; break; fi
+  sleep 1
+done
+if [ "$OPENCODE_READY" -ne 1 ]; then
+  $SUDO systemctl --no-pager --full status aidt-opencode.service >&2 || true
+  echo "[deploy] ERROR: OpenCode server did not become ready on port 4096" >&2
+  exit 1
+fi
+echo "[deploy] OpenCode server ready on http://0.0.0.0:4096"
 `
 
 const crushUpdateScript = `set -e
@@ -395,13 +529,14 @@ echo "[deploy] openclaw: $(command -v openclaw)"
 // was missing/off-PATH and blocked registration).
 func (m *model) agentDeployScript(a agentDef) string {
 	if a.name == "Crush" {
-		return crushDeployScript
+		return "set -e\n" + obsidianBootstrap + strings.TrimPrefix(crushDeployScript, "set -e\n")
 	}
 	model := m.effDefaultModel()
 	gateway := a.name == "Hermes" && m.hermesGatewayWanted()
 
 	var b strings.Builder
 	b.WriteString("set -e\n")
+	b.WriteString(obsidianBootstrap)
 	b.WriteString(depsBootstrap)
 	if a.name == "Hermes" {
 		b.WriteString("export HERMES_NONINTERACTIVE=1\n")
@@ -418,15 +553,18 @@ func (m *model) agentDeployScript(a agentDef) string {
 	if a.name == "OpenCode" {
 		b.Reset()
 		b.WriteString("set -e\n")
+		b.WriteString(obsidianBootstrap)
 		b.WriteString(cliDepsBootstrap)
 		b.WriteString(openCodeInstallFragment)
 		b.WriteString(m.agentConfigScript(a))
-		b.WriteString("echo \"[deploy] OpenCode installed and pointed at Olla. Open it from Agents (enter).\"\n")
+		b.WriteString(openCodeServerFragment)
+		b.WriteString("echo \"[deploy] OpenCode installed, pointed at Olla, and serving on port 4096.\"\n")
 		return b.String()
 	}
 	if a.name == "Goose" {
 		b.Reset()
 		b.WriteString("set -e\n")
+		b.WriteString(obsidianBootstrap)
 		b.WriteString(cliDepsBootstrap)
 		b.WriteString(gooseInstallFragment)
 		b.WriteString(m.agentConfigScript(a))
@@ -436,6 +574,7 @@ func (m *model) agentDeployScript(a agentDef) string {
 	if a.name == "Grok Build" {
 		b.Reset()
 		b.WriteString("set -e\n")
+		b.WriteString(obsidianBootstrap)
 		b.WriteString(cliDepsBootstrap)
 		b.WriteString(grokInstallFragment)
 		b.WriteString(m.agentConfigScript(a))
@@ -445,10 +584,21 @@ func (m *model) agentDeployScript(a agentDef) string {
 	if a.name == "Claude Code" {
 		b.Reset()
 		b.WriteString("set -e\n")
+		b.WriteString(obsidianBootstrap)
 		b.WriteString(cliDepsBootstrap)
 		b.WriteString(claudeCodeInstallFragment)
 		b.WriteString(m.agentConfigScript(a))
 		b.WriteString("echo \"[deploy] Claude Code installed. AIDT will open it through Olla's Anthropic endpoint.\"\n")
+		return b.String()
+	}
+	if a.name == "Codex" {
+		b.Reset()
+		b.WriteString("set -e\n")
+		b.WriteString(obsidianBootstrap)
+		b.WriteString(cliDepsBootstrap)
+		b.WriteString(codexInstallFragment)
+		b.WriteString(m.agentConfigScript(a))
+		b.WriteString("echo \"[deploy] Codex installed and pointed at Olla. Open it from Agents (enter).\"\n")
 		return b.String()
 	}
 	if a.name == "OpenClaw" {
@@ -479,6 +629,8 @@ func (m *model) agentConfigScript(a agentDef) string {
 		return m.grokConfigScript(model)
 	case "Claude Code":
 		return m.claudeCodeConfigScript(model)
+	case "Codex":
+		return m.codexConfigScript(model)
 	default:
 		return ""
 	}
@@ -602,7 +754,7 @@ OLLA_BASE='%s' OLLA_KEY='%s' OLLA_MODEL='%s' "$PY" /tmp/aidt-hermes-olla.py
 
 // openCodeConfigScript writes an AIDT-owned configuration and leaves any normal
 // OpenCode config untouched. OPENCODE_CONFIG selects it when AIDT launches the
-// agent. The mode-0600 file stores the same Olla token AIDT persists locally.
+// agent. The same token protects the HTTP server using OpenCode Basic Auth.
 func (m *model) openCodeConfigScript(defaultModel string) string {
 	models := map[string]any{}
 	add := func(name string) {
@@ -630,15 +782,20 @@ func (m *model) openCodeConfigScript(defaultModel string) string {
 		},
 	}
 	b, _ := json.MarshalIndent(cfg, "", "  ")
+	serverPassword := strings.NewReplacer("\\", "\\\\", "\"", "\\\"", "\r", "", "\n", "").Replace(orDefault(m.token, "olla"))
+	serverEnv := "OPENCODE_SERVER_USERNAME=opencode\nOPENCODE_SERVER_PASSWORD=\"" + serverPassword + "\"\n"
 	encoded := base64.StdEncoding.EncodeToString(b)
+	serverEnvEncoded := base64.StdEncoding.EncodeToString([]byte(serverEnv))
 	return fmt.Sprintf(`echo "[deploy] writing AIDT OpenCode configuration…"
 (
 umask 077
 mkdir -p "$HOME/.config/aidt"
 echo %s | base64 -d > "$HOME/.config/aidt/opencode.json"
 chmod 600 "$HOME/.config/aidt/opencode.json"
+echo %s | base64 -d > "$HOME/.config/aidt/opencode-server.env"
+chmod 600 "$HOME/.config/aidt/opencode-server.env"
 )
-`, encoded)
+`, encoded, serverEnvEncoded)
 }
 
 // gooseConfigScript registers a named OpenAI-compatible provider using Goose's
@@ -742,6 +899,39 @@ chmod 600 "$HOME/.config/aidt/claude-code.env"
 `, encoded)
 }
 
+// codexConfigScript keeps AIDT's provider and token separate from the user's
+// normal Codex state. Current Codex releases use the Responses API for custom
+// providers, which Olla exposes below its OpenAI-compatible base URL.
+func (m *model) codexConfigScript(model string) string {
+	quote := func(s string) string {
+		b, _ := json.Marshal(s)
+		return string(b)
+	}
+	base := strings.TrimRight(m.gateway, "/") + "/olla/openai/v1"
+	config := fmt.Sprintf(`model = %s
+model_provider = "aidt_olla"
+
+[model_providers.aidt_olla]
+name = "Olla"
+base_url = %s
+env_key = "OLLA_API_KEY"
+wire_api = "responses"
+`, quote(model), quote(base))
+	env := fmt.Sprintf("export OLLA_API_KEY='%s'\n", shSingle(orDefault(m.token, "olla")))
+	configEncoded := base64.StdEncoding.EncodeToString([]byte(config))
+	envEncoded := base64.StdEncoding.EncodeToString([]byte(env))
+	return fmt.Sprintf(`echo "[deploy] writing AIDT Codex configuration..."
+(
+umask 077
+mkdir -p "$HOME/.config/aidt/codex"
+echo %s | base64 -d > "$HOME/.config/aidt/codex/config.toml"
+chmod 600 "$HOME/.config/aidt/codex/config.toml"
+echo %s | base64 -d > "$HOME/.config/aidt/codex.env"
+chmod 600 "$HOME/.config/aidt/codex.env"
+)
+`, configEncoded, envEncoded)
+}
+
 // agentUninstallScript returns the shell that removes an agent install from a
 // host. Best-effort by design: each step tolerates a partial/older install, and
 // user data that isn't clearly the agent's own install tree is left alone
@@ -782,8 +972,16 @@ echo "[remove] hermes removed"
 `
 	case "OpenCode":
 		return `echo "[remove] uninstalling opencode…"
+if [ "$(id -u)" -eq 0 ]; then SUDO=""; else SUDO="sudo"; fi
+$SUDO systemctl disable --now aidt-opencode.service >/dev/null 2>&1 || true
+$SUDO rm -f /etc/systemd/system/aidt-opencode.service
+$SUDO systemctl daemon-reload >/dev/null 2>&1 || true
+if command -v firewall-cmd >/dev/null 2>&1 && $SUDO firewall-cmd --state >/dev/null 2>&1; then
+  $SUDO firewall-cmd --permanent --remove-port=4096/tcp >/dev/null 2>&1 || true
+  $SUDO firewall-cmd --reload >/dev/null 2>&1 || true
+fi
 rm -f "$HOME/.local/bin/opencode" "$HOME/.opencode/bin/opencode"
-rm -rf "$HOME/.opencode" "$HOME/.config/aidt/opencode.json"
+rm -rf "$HOME/.opencode" "$HOME/.config/aidt/opencode.json" "$HOME/.config/aidt/opencode-server.env"
 echo "[remove] OpenCode removed"
 `
 	case "Goose":
@@ -811,15 +1009,21 @@ rm -rf "$HOME/.local/share/claude"
 rm -f "$HOME/.config/aidt/claude-code.env"
 echo "[remove] Claude Code removed (user settings kept in ~/.claude)"
 `
+	case "Codex":
+		return `echo "[remove] uninstalling Codex..."
+rm -f "$HOME/.local/bin/codex" "$HOME/.codex/bin/codex"
+rm -rf "$HOME/.config/aidt/codex" "$HOME/.config/aidt/codex.env"
+echo "[remove] Codex removed (user settings kept in ~/.codex)"
+`
 	}
 	return ""
 }
 
-// agentOpenCmd launches each CLI with Olla selected and in a dedicated workspace.
+// agentOpenCmd launches each CLI with Olla selected in the shared Obsidian vault.
 // AIDT-owned mode-0600 files keep credentials out of long-lived ssh argv.
 func (m *model) agentOpenCmd(a agentDef) string {
 	model := m.effDefaultModel()
-	workspace := `mkdir -p "$HOME/.ai-deployment-toolkit/agent-workspace" && cd "$HOME/.ai-deployment-toolkit/agent-workspace" && `
+	workspace := `mkdir -p "$HOME/Obsidian/AIDT-Agent-Vault/.obsidian" && cd "$HOME/Obsidian/AIDT-Agent-Vault" && `
 
 	var cmd string
 	switch a.name {
@@ -833,8 +1037,10 @@ func (m *model) agentOpenCmd(a agentDef) string {
 		cmd = fmt.Sprintf("export GROK_HOME=\"$HOME/.config/aidt/grok\"; %sexec grok", workspace)
 	case "Claude Code":
 		cmd = fmt.Sprintf(". \"$HOME/.config/aidt/claude-code.env\"; %sexec claude", workspace)
+	case "Codex":
+		cmd = fmt.Sprintf(". \"$HOME/.config/aidt/codex.env\"; export CODEX_HOME=\"$HOME/.config/aidt/codex\"; %sexec codex", workspace)
 	default:
-		cmd = a.cli
+		cmd = workspace + "exec " + a.cli
 	}
 	return loginShell(cmd)
 }
@@ -1055,7 +1261,7 @@ func (m *model) agentHost(a agentDef) string {
 func loginShell(cmd string) string {
 	// Prepend common install dirs inside the login shell too — some images'
 	// .bash_profile never sources .bashrc, so npm-global/local bins stay hidden.
-	inner := `export PATH="/usr/local/bin:$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.opencode/bin:$HOME/.grok/bin:$PATH"; ` + cmd
+	inner := `export PATH="/usr/local/bin:$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.opencode/bin:$HOME/.grok/bin:$HOME/.codex/bin:$PATH"; ` + cmd
 	return "bash -lc '" + shSingle(inner) + "'"
 }
 

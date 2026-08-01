@@ -117,10 +117,10 @@ the first nine sections; `0` opens Update.
 | Pool | View, add, and remove Ollama endpoints from the Olla configuration. |
 | Models | List, pull, delete, warm, and select models across workers. |
 | Chat | Stream OpenAI-compatible chat responses with bounded session history and optional URL fetch context. |
-| Agents | Deploy and open Crush, OpenCode, Goose, Grok Build, Claude Code, and Hermes. |
+| Agents | Deploy and open Crush, OpenCode, Goose, Grok Build, Claude Code, Codex, and Hermes. |
 | Load | Visualize per-worker request share and active connections. |
 | Nutanix | Configure Prism placement, deploy or delete VMs, and run custom deployments. |
-| Services | List gateway, worker, and custom-service URLs with direct clickable links. |
+| Services | List gateway, worker, agent-server, and custom-service URLs with direct clickable links. |
 | Access | Show client endpoint values, model selection, and example requests. |
 | Update | Update AIDT, guests, Olla, Ollama, agents, images, and Ollama cloud keys. |
 
@@ -277,13 +277,18 @@ The current catalog contains:
 - **Crush**: configured to use the Olla OpenAI endpoint for the whole worker
   pool.
 - **OpenCode**: uses an AIDT-owned provider config that selects Olla and the
-  current default model.
+  current default model. Deployments also run an OpenCode server on port `4096`
+  and register its URL in Services. The server uses Basic Auth with username
+  `opencode` and the API token active at deployment time as its password (`olla`
+  when no token is configured).
 - **Goose**: uses an Olla custom provider through its official OpenAI-compatible
   provider format.
 - **Grok Build**: installed from xAI's official installer with an isolated
   `GROK_HOME` that selects Olla by default.
 - **Claude Code**: launched through Olla's Anthropic Messages API translator
   using the current default model.
+- **Codex**: installed from OpenAI's official installer and launched with an
+  isolated `CODEX_HOME` configured for Olla's OpenAI-compatible endpoint.
 - **Hermes**: configured to use Olla as a custom provider. Optional Telegram
   gateway settings are available.
 
@@ -295,14 +300,11 @@ clears any agent registrations on that host. If a host was already deleted
 externally, Remove still clears the stale registration and reports remote
 cleanup as unconfirmed.
 
-Crush normally inventories its current directory at startup to build project
-context. AIDT launches it in the dedicated
-`~/.ai-deployment-toolkit/crush-workspace` directory so it does not scan the
-directory from which AIDT was started.
-
-OpenCode, Goose, Grok Build, and Claude Code launch in
-`~/.ai-deployment-toolkit/agent-workspace`. AIDT stores their Olla provider
-configuration in mode-`0600` files so credentials are not exposed in
+Before installing an agent, AIDT checks for Obsidian and installs the official
+AppImage when it is absent. Every agent launches in the shared Obsidian vault
+at `~/Obsidian/AIDT-Agent-Vault`, so generated notes and project context remain
+available to Obsidian and to the other deployed agents. AIDT stores agent Olla
+provider configuration in mode-`0600` files so credentials are not exposed in
 long-lived SSH command arguments.
 
 ## Runtime State

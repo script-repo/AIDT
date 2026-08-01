@@ -73,10 +73,10 @@ func TestCrushDeployScriptShellSyntax(t *testing.T) {
 	}
 }
 
-func TestCrushOpensInDedicatedWorkspace(t *testing.T) {
+func TestCrushOpensInObsidianVault(t *testing.T) {
 	for _, want := range []string{
-		`mkdir -p "$HOME/.ai-deployment-toolkit/crush-workspace"`,
-		`cd "$HOME/.ai-deployment-toolkit/crush-workspace"`,
+		`mkdir -p "$HOME/Obsidian/AIDT-Agent-Vault/.obsidian"`,
+		`cd "$HOME/Obsidian/AIDT-Agent-Vault"`,
 		"exec crush",
 	} {
 		if !strings.Contains(crushOpenCommand, want) {
@@ -161,15 +161,15 @@ func TestUpdatePlanIncludesRegisteredNewAgents(t *testing.T) {
 	m.tokFile = filepath.Join(t.TempDir(), "tui.json")
 	m.agentReg = map[string]string{}
 	m.agentHosts = map[string][]string{}
-	for _, name := range []string{"OpenCode", "Goose", "Grok Build", "Claude Code"} {
+	for _, name := range []string{"OpenCode", "Goose", "Grok Build", "Claude Code", "Codex"} {
 		m.agentReg[name] = "10.0.0.1"
 		m.agentHosts[name] = []string{"10.0.0.1"}
 	}
 	steps := m.updateAgentsSteps()
-	if len(steps) != 4 {
-		t.Fatalf("update plan has %d steps, want only 4 registered agents", len(steps))
+	if len(steps) != 5 {
+		t.Fatalf("update plan has %d steps, want only 5 registered agents", len(steps))
 	}
-	for _, name := range []string{"OpenCode", "Goose", "Grok Build", "Claude Code"} {
+	for _, name := range []string{"OpenCode", "Goose", "Grok Build", "Claude Code", "Codex"} {
 		found := false
 		for _, step := range steps {
 			if strings.Contains(step.title, name) {
@@ -247,10 +247,11 @@ func TestNewAgentDeployScriptsUseOfficialInstallers(t *testing.T) {
 	m.tokFile = filepath.Join(t.TempDir(), "tui.json")
 	m.token = "tok"
 	wants := map[string][]string{
-		"OpenCode":    {"https://opencode.ai/install", "AIDT OpenCode configuration"},
+		"OpenCode":    {"https://opencode.ai/install", "AIDT OpenCode configuration", "aidt-opencode.service", "systemctl restart aidt-opencode.service", "--port 4096", "/global/health", "opencode-server.env", "curl -fsS -u"},
 		"Goose":       {"github.com/aaif-goose/goose/releases/download/stable/download_cli.sh", "writing Olla provider for Goose"},
 		"Grok Build":  {"https://x.ai/cli/install.sh", "AIDT Grok Build configuration"},
 		"Claude Code": {"https://claude.ai/install.sh", "Claude Code installed"},
+		"Codex":       {"https://chatgpt.com/codex/install.sh", "AIDT Codex configuration"},
 	}
 	for name, expected := range wants {
 		script := m.agentDeployScript(mustAgent(t, name))
@@ -273,7 +274,7 @@ func TestNewAgentOllaConfiguration(t *testing.T) {
 	m.tokFile = filepath.Join(t.TempDir(), "tui.json")
 	m.token = ""
 	m.defModel = "qwen3:8b"
-	for _, a := range []agentDef{mustAgent(t, "OpenCode"), mustAgent(t, "Goose"), mustAgent(t, "Grok Build"), mustAgent(t, "Claude Code")} {
+	for _, a := range []agentDef{mustAgent(t, "OpenCode"), mustAgent(t, "Goose"), mustAgent(t, "Grok Build"), mustAgent(t, "Claude Code"), mustAgent(t, "Codex")} {
 		if !strings.Contains(m.agentConfigScript(a), "umask 077") {
 			t.Errorf("%s config does not set a private umask before writing credentials", a.name)
 		}
@@ -315,6 +316,36 @@ func TestNewAgentOllaConfiguration(t *testing.T) {
 	for _, want := range []string{"ANTHROPIC_BASE_URL", "/olla/anthropic", "ANTHROPIC_DEFAULT_SONNET_MODEL", "qwen3:8b"} {
 		if !strings.Contains(claudeEnv, want) {
 			t.Errorf("Claude Code environment missing %q", want)
+		}
+	}
+
+	codex := string(decodeScriptPayload(t, m.codexConfigScript(m.effDefaultModel())))
+	for _, want := range []string{`model = "qwen3:8b"`, `model_provider = "aidt_olla"`, `base_url = "http://10.0.0.1:40114/olla/openai/v1"`, `env_key = "OLLA_API_KEY"`, `wire_api = "responses"`} {
+		if !strings.Contains(codex, want) {
+			t.Errorf("Codex config missing %q", want)
+		}
+	}
+}
+
+func TestEveryAgentDeployPreparesObsidianVaultFirst(t *testing.T) {
+	m := newModel("http://10.0.0.1:40114", "rocky", "pw")
+	m.tokFile = filepath.Join(t.TempDir(), "tui.json")
+	for _, a := range agentCatalog {
+		script := m.agentDeployScript(a)
+		obsidianAt := strings.Index(script, "checking Obsidian")
+		vaultAt := strings.Index(script, "$HOME/Obsidian/AIDT-Agent-Vault")
+		installAt := strings.Index(script, "installing/updating "+a.name)
+		if a.name == "Crush" {
+			installAt = strings.Index(script, "installing Crush dependencies")
+		}
+		if a.name == "Hermes" {
+			installAt = strings.Index(script, "installing hermes")
+		}
+		if obsidianAt < 0 || vaultAt < 0 || installAt < 0 || obsidianAt > installAt {
+			t.Errorf("%s does not prepare Obsidian and its vault before agent installation", a.name)
+		}
+		if !strings.Contains(m.agentOpenCmd(a), `cd "$HOME/Obsidian/AIDT-Agent-Vault"`) {
+			t.Errorf("%s does not open in the Obsidian vault", a.name)
 		}
 	}
 }
@@ -387,6 +418,16 @@ func TestAgentBatchDeploymentRegistersSuccessfulWorkers(t *testing.T) {
 	}
 	if m.agentBusy {
 		t.Fatal("batch completion did not clear the deployment busy flag")
+	}
+	serviceCount := 0
+	for _, raw := range m.servicesList.Items() {
+		service := raw.(serviceItem)
+		if service.name == "OpenCode" && service.kind == "agent server" {
+			serviceCount++
+		}
+	}
+	if serviceCount != 2 {
+		t.Fatalf("batch deployment registered %d OpenCode services, want 2", serviceCount)
 	}
 
 	item := agentItem{name: "OpenCode", desc: "coding agent", endpoint: "Olla", registered: true, regHost: "10.0.0.2", regCount: 2}
@@ -521,6 +562,7 @@ func TestNewAgentOpenCommandsSelectOlla(t *testing.T) {
 		"Goose":       {"goose.env", "GOOSE_PROVIDER=olla", "GOOSE_MODEL", "exec goose session"},
 		"Grok Build":  {"GROK_HOME", "exec grok"},
 		"Claude Code": {"claude-code.env", "exec claude"},
+		"Codex":       {"codex.env", "CODEX_HOME", "exec codex"},
 	}
 	for name, expected := range wants {
 		cmd := m.agentOpenCmd(mustAgent(t, name))
@@ -531,6 +573,15 @@ func TestNewAgentOpenCommandsSelectOlla(t *testing.T) {
 		}
 		if strings.Contains(cmd, m.token) {
 			t.Errorf("%s open command exposes the Olla token in argv", name)
+		}
+	}
+}
+
+func TestOpenCodeUninstallRemovesServerService(t *testing.T) {
+	script := agentUninstallScript(mustAgent(t, "OpenCode"))
+	for _, want := range []string{"systemctl disable --now aidt-opencode.service", "/etc/systemd/system/aidt-opencode.service", "systemctl daemon-reload", "--remove-port=4096/tcp"} {
+		if !strings.Contains(script, want) {
+			t.Errorf("OpenCode uninstall missing %q", want)
 		}
 	}
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -11,7 +12,7 @@ import (
 )
 
 // serviceItem is one directly accessible service exposed by the gateway, an
-// Ollama worker, or a successfully completed custom deployment.
+// Ollama worker, a deployed agent server, or a completed custom deployment.
 type serviceItem struct {
 	name   string
 	target string
@@ -34,10 +35,10 @@ func validServiceURL(raw string) bool {
 	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
 }
 
-// refreshServices combines live gateway/worker URLs with persisted custom
-// services. Only successful custom installs are persisted.
+// refreshServices combines live gateway/worker URLs, registered agent servers,
+// and persisted custom services. Only successful custom installs are persisted.
 func (m *model) refreshServices() {
-	items := make([]list.Item, 0, 1+len(m.endpoints)+len(m.services))
+	items := make([]list.Item, 0, 1+len(m.endpoints)+len(m.agentHosts["OpenCode"])+len(m.services))
 	seen := map[string]bool{}
 	add := func(i serviceItem) {
 		if !validServiceURL(i.url) || seen[i.name+"\x00"+i.target+"\x00"+i.url] {
@@ -51,6 +52,18 @@ func (m *model) refreshServices() {
 	}
 	for _, e := range m.endpoints {
 		add(serviceItem{name: e.Name, target: hostFromURL(e.URL), url: e.URL, kind: "Ollama worker"})
+	}
+	for _, host := range m.agentDeployedHosts("OpenCode") {
+		host = strings.Trim(strings.TrimSpace(host), "[]")
+		if host == "" {
+			continue
+		}
+		add(serviceItem{
+			name:   "OpenCode",
+			target: host,
+			url:    (&url.URL{Scheme: "http", Host: net.JoinHostPort(host, "4096"), Path: "/doc"}).String(),
+			kind:   "agent server",
+		})
 	}
 	for _, s := range m.services {
 		add(serviceItem{name: s.Name, target: s.Target, url: s.URL, kind: "custom service"})

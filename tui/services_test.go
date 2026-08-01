@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestGatewayServiceUsesVMName(t *testing.T) {
 	m := newModel("http://10.0.0.10:40114", "rocky", "pw")
@@ -35,5 +38,49 @@ func TestGatewayServiceDoesNotUseUnrelatedVM(t *testing.T) {
 	m.vms = []VM{{Name: "aidt-gateway-99", IP: "10.0.0.99", Role: "gateway"}}
 	if got := m.gatewayServiceName(); got != "Olla gateway" {
 		t.Fatalf("unrelated gateway VM was used as service name: %q", got)
+	}
+}
+
+func TestRegisteredOpenCodeHostsAppearAsServices(t *testing.T) {
+	m := newModel("http://10.0.0.1:40114", "rocky", "pw")
+	m.agentReg["OpenCode"] = "10.0.0.2"
+	m.agentHosts["OpenCode"] = []string{"10.0.0.2", "worker.example.com"}
+	m.refreshServices()
+
+	var services []serviceItem
+	for _, item := range m.servicesList.Items() {
+		service := item.(serviceItem)
+		if service.name == "OpenCode" {
+			services = append(services, service)
+		}
+	}
+	if len(services) != 2 {
+		t.Fatalf("OpenCode service count = %d, want 2", len(services))
+	}
+	for _, service := range services {
+		if service.kind != "agent server" || !strings.HasSuffix(service.url, ":4096/doc") {
+			t.Errorf("unexpected OpenCode service: %#v", service)
+		}
+	}
+}
+
+func TestOpenCodeServiceSupportsIPv6Hosts(t *testing.T) {
+	m := newModel("http://10.0.0.1:40114", "rocky", "pw")
+	m.agentReg["OpenCode"] = "2001:db8::10"
+	m.agentHosts["OpenCode"] = []string{"2001:db8::10"}
+	m.refreshServices()
+
+	found := false
+	for _, item := range m.servicesList.Items() {
+		service := item.(serviceItem)
+		if service.name == "OpenCode" {
+			found = true
+			if service.url != "http://[2001:db8::10]:4096/doc" {
+				t.Fatalf("IPv6 OpenCode URL = %q", service.url)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("IPv6 OpenCode service missing")
 	}
 }

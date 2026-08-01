@@ -1247,6 +1247,7 @@ func (m *model) refreshAgents() {
 		})
 	}
 	m.agentsList.SetItems(items)
+	m.refreshServices()
 }
 
 // openSelectedAgent launches on the registered worker, or prompts when the agent
