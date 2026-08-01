@@ -43,6 +43,18 @@ func workersFromEndpoints(eps []endpointEntry) []workerRef {
 	return out
 }
 
+func uniqueWorkerRefs(workers []workerRef) []workerRef {
+	seen := map[string]bool{}
+	out := make([]workerRef, 0, len(workers))
+	for _, w := range workers {
+		if w.host != "" && !seen[w.host] {
+			seen[w.host] = true
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
 // modelMatches reports whether an installed tag refers to the same model,
 // tolerating an implicit :latest tag on either side.
 func modelMatches(installed, want string) bool {

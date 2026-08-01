@@ -82,7 +82,10 @@ func localMergeCrushConfig(config string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(out, '\n'), 0o644)
+	if err := os.WriteFile(path, append(out, '\n'), 0o600); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o600)
 }
 
 // deepMerge recursively merges b into a; nested objects are merged, while lists

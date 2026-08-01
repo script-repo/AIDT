@@ -57,6 +57,17 @@ func runSSH(client *ssh.Client, cmd string) (string, error) {
 	return string(out), err
 }
 
+func runSSHInput(client *ssh.Client, cmd, input string) (string, error) {
+	sess, err := client.NewSession()
+	if err != nil {
+		return "", err
+	}
+	defer sess.Close()
+	sess.Stdin = strings.NewReader(input)
+	out, err := sess.CombinedOutput(cmd)
+	return string(out), err
+}
+
 func readRemoteFile(client *ssh.Client, path string) (string, error) {
 	return runSSH(client, "cat "+path)
 }
@@ -97,7 +108,7 @@ func uploadRemoteScript(host, user, password, remotePath, script string) error {
 	return sshWriteFile(host, user, password, "", remotePath, script, true)
 }
 
-// crushMergePy deep-merges a JSON fragment (argv[1]) into the existing
+// crushMergePy deep-merges a JSON fragment from stdin into the existing
 // ~/.config/crush/crush.json, recursing into nested objects so the TUI's olla
 // provider update preserves sections it does not manage (notably manually
 // registered `mcp` servers, plus `lsp`/`options`). Lists and scalars are
@@ -105,8 +116,7 @@ func uploadRemoteScript(host, user, password, remotePath, script string) error {
 const crushMergePy = `import json, os, sys
 base = os.path.expanduser("~/.config/crush/crush.json")
 os.makedirs(os.path.dirname(base), exist_ok=True)
-with open(sys.argv[1]) as f:
-    new = json.load(f)
+new = json.load(sys.stdin)
 cur = {}
 if os.path.exists(base):
     try:
@@ -124,6 +134,7 @@ merge(cur, new)
 with open(base, "w") as f:
     json.dump(cur, f, indent=2)
     f.write("\n")
+os.chmod(base, 0o600)
 `
 
 // sshMergeCrushConfig merges the given crush.json document (TUI-managed
@@ -136,11 +147,9 @@ func sshMergeCrushConfig(host, user, password, config string) error {
 		return err
 	}
 	defer client.Close()
-	cfgB64 := base64.StdEncoding.EncodeToString([]byte(config))
 	pyB64 := base64.StdEncoding.EncodeToString([]byte(crushMergePy))
-	cmd := fmt.Sprintf("mkdir -p ~/.config/crush && echo %s | base64 -d > /tmp/crush-new.json && echo %s | base64 -d > /tmp/crush-merge.py && python3 /tmp/crush-merge.py /tmp/crush-new.json && rm -f /tmp/crush-merge.py /tmp/crush-new.json",
-		cfgB64, pyB64)
-	if out, err := runSSH(client, cmd); err != nil {
+	cmd := fmt.Sprintf("umask 077; mkdir -p ~/.config/crush; TMP=$(mktemp); trap 'rm -f \"$TMP\"' EXIT; echo %s | base64 -d > \"$TMP\"; python3 \"$TMP\"", pyB64)
+	if out, err := runSSHInput(client, cmd, config); err != nil {
 		return fmt.Errorf("%v: %s", err, strings.TrimSpace(out))
 	}
 	return nil

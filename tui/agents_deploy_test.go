@@ -271,6 +271,7 @@ func TestNewAgentDeployScriptsUseOfficialInstallers(t *testing.T) {
 func TestNewAgentOllaConfiguration(t *testing.T) {
 	m := newModel("http://10.0.0.1:40114", "rocky", "pw")
 	m.tokFile = filepath.Join(t.TempDir(), "tui.json")
+	m.token = ""
 	m.defModel = "qwen3:8b"
 	for _, a := range []agentDef{mustAgent(t, "OpenCode"), mustAgent(t, "Goose"), mustAgent(t, "Grok Build"), mustAgent(t, "Claude Code")} {
 		if !strings.Contains(m.agentConfigScript(a), "umask 077") {
@@ -314,6 +315,198 @@ func TestNewAgentOllaConfiguration(t *testing.T) {
 	for _, want := range []string{"ANTHROPIC_BASE_URL", "/olla/anthropic", "ANTHROPIC_DEFAULT_SONNET_MODEL", "qwen3:8b"} {
 		if !strings.Contains(claudeEnv, want) {
 			t.Errorf("Claude Code environment missing %q", want)
+		}
+	}
+}
+
+func TestAgentCatalogDeploysToWorkers(t *testing.T) {
+	for _, a := range agentCatalog {
+		if a.target != "worker" {
+			t.Errorf("%s target = %q, want worker", a.name, a.target)
+		}
+	}
+}
+
+func TestAgentWorkerHostsDeduplicatesEndpoints(t *testing.T) {
+	m := newModel("http://10.0.0.1:40114", "rocky", "pw")
+	m.endpoints = []endpointEntry{
+		{Name: "worker-1", URL: "http://10.0.0.2:11434", Type: "ollama"},
+		{Name: "worker-1-alias", URL: "http://10.0.0.2:11434", Type: "ollama"},
+		{Name: "worker-2", URL: "http://10.0.0.3:11434", Type: "ollama"},
+		{Name: "vllm", URL: "http://10.0.0.4:8000", Type: "vllm"},
+	}
+	if got := strings.Join(m.agentWorkerHosts(), ","); got != "10.0.0.2,10.0.0.3" {
+		t.Fatalf("agent worker hosts = %q", got)
+	}
+}
+
+func TestAllWorkerSelectionStartsBatchDeployment(t *testing.T) {
+	m := newModel("http://10.0.0.1:40114", "rocky", "pw")
+	m.endpoints = []endpointEntry{
+		{Name: "worker-1", URL: "http://10.0.0.2:11434", Type: "ollama"},
+		{Name: "worker-2", URL: "http://10.0.0.3:11434", Type: "ollama"},
+	}
+	m.modal = modalAgentHost
+	m.pendingAgent = "OpenCode"
+	m.pendingAct = "deploy"
+	m.fAgentHost = "all"
+	m.pendingAgentHosts = []string{"10.0.0.2", "10.0.0.3"}
+	// A background refresh after the picker opened must not change the confirmed set.
+	m.endpoints = append(m.endpoints, endpointEntry{Name: "worker-3", URL: "http://10.0.0.4:11434", Type: "ollama"})
+
+	cmd := m.onFormComplete()
+	if cmd == nil {
+		t.Fatal("all-worker selection did not start a deployment")
+	}
+	if !strings.Contains(m.notice, "all 2 workers") {
+		t.Fatalf("unexpected deployment notice: %q", m.notice)
+	}
+}
+
+func TestAgentBatchDeploymentRegistersSuccessfulWorkers(t *testing.T) {
+	m := newModel("http://10.0.0.1:40114", "rocky", "pw")
+	m.tokFile = filepath.Join(t.TempDir(), "tui.json")
+	m.agentReg = map[string]string{}
+	m.agentHosts = map[string][]string{}
+	m.agentBusy = true
+
+	m = drive(m, agentBatchDeployedMsg{
+		agent:   "OpenCode",
+		okHosts: []string{"10.0.0.2", "10.0.0.3"},
+		errs:    []string{"10.0.0.4: connection refused"},
+	})
+
+	if got := strings.Join(m.agentHosts["OpenCode"], ","); got != "10.0.0.2,10.0.0.3" {
+		t.Fatalf("registered batch hosts = %q", got)
+	}
+	if m.agentReg["OpenCode"] != "10.0.0.2" {
+		t.Fatalf("primary batch registration = %q", m.agentReg["OpenCode"])
+	}
+	if !strings.Contains(m.notice, "deployed on 2 worker(s)") || !strings.Contains(m.notice, "connection refused") {
+		t.Fatalf("batch notice did not report partial success: %q", m.notice)
+	}
+	if m.agentBusy {
+		t.Fatal("batch completion did not clear the deployment busy flag")
+	}
+
+	item := agentItem{name: "OpenCode", desc: "coding agent", endpoint: "Olla", registered: true, regHost: "10.0.0.2", regCount: 2}
+	if !strings.Contains(item.Description(), "deployed on 2 workers") {
+		t.Fatalf("multi-worker agent description = %q", item.Description())
+	}
+}
+
+func TestAgentDeployManyExecutesLocalBatchPath(t *testing.T) {
+	a := agentDef{name: "Test Agent", cli: "true", deployable: true, target: "worker"}
+	msg := agentDeployManyCmd(
+		a,
+		[]string{"localhost"},
+		"rocky",
+		"",
+		agentBatchDeployOptions{scripts: map[string]string{"localhost": "set -e\nprintf 'batch-ok\\n'\n"}},
+	)().(agentBatchDeployedMsg)
+	if strings.Join(msg.okHosts, ",") != "localhost" || len(msg.errs) != 0 {
+		t.Fatalf("local batch deployment result: ok=%v errs=%v", msg.okHosts, msg.errs)
+	}
+}
+
+func TestHermesGatewayFallsBackToSuccessfulWorker(t *testing.T) {
+	a := agentDef{name: "Hermes", cli: "hermes", deployable: true, target: "worker"}
+	msg := agentDeployManyCmd(
+		a,
+		[]string{"localhost", "127.0.0.1"},
+		"rocky",
+		"",
+		agentBatchDeployOptions{
+			scripts: map[string]string{
+				"localhost": "exit 1\n",
+				"127.0.0.1": "exit 0\n",
+			},
+			gatewayHost:     "localhost",
+			gatewayFallback: "exit 0\n",
+		},
+	)().(agentBatchDeployedMsg)
+	if strings.Join(msg.okHosts, ",") != "127.0.0.1" {
+		t.Fatalf("Hermes fallback successes = %v", msg.okHosts)
+	}
+	if msg.gatewayHost != "127.0.0.1" {
+		t.Fatalf("Hermes gateway fallback host = %q", msg.gatewayHost)
+	}
+}
+
+func TestAgentBusyBlocksMaintenance(t *testing.T) {
+	m := newModel("http://10.0.0.1:40114", "rocky", "pw")
+	m.agentBusy = true
+	if cmd := m.startUpdatePlan([]updateStep{{title: "test", local: true, script: "true"}}, "test"); cmd != nil {
+		t.Fatal("maintenance started during all-worker agent deployment")
+	}
+	if !strings.Contains(m.notice, "active agent deployment or removal") {
+		t.Fatalf("unexpected busy notice: %q", m.notice)
+	}
+}
+
+func TestMaintenanceAndRemovalBlockAgentDeployment(t *testing.T) {
+	m := newModel("http://10.0.0.1:40114", "rocky", "pw")
+	m.endpoints = []endpointEntry{{Name: "worker-1", URL: "http://10.0.0.2:11434", Type: "ollama"}}
+	m.refreshAgents()
+	m.procBusy = true
+	if cmd := m.deploySelectedAgent(); cmd != nil {
+		t.Fatal("agent deployment started during maintenance")
+	}
+	if !strings.Contains(m.notice, "active deployment, removal, or update") {
+		t.Fatalf("unexpected maintenance notice: %q", m.notice)
+	}
+
+	m.procBusy = false
+	m.agentReg = map[string]string{"Hermes": "10.0.0.2"}
+	m.agentHosts = map[string][]string{"Hermes": {"10.0.0.2"}}
+	m.modal = modalAgentRemove
+	m.pendingAgent = "Hermes"
+	m.fRemoveTarget = "10.0.0.2"
+	if cmd := m.onFormComplete(); cmd == nil {
+		t.Fatal("agent removal did not start")
+	}
+	if !m.agentBusy {
+		t.Fatal("agent removal did not set the busy state")
+	}
+}
+
+func TestOpenMultiHostAgentWithoutEndpointInventory(t *testing.T) {
+	m := newModel("http://10.0.0.1:40114", "rocky", "pw")
+	m.agentReg = map[string]string{"OpenCode": "10.0.0.2"}
+	m.agentHosts = map[string][]string{"OpenCode": {"10.0.0.2", "10.0.0.3"}}
+	m.endpoints = nil
+
+	cmd := m.openAgentHostPick("OpenCode", "open")
+	if cmd == nil || m.form == nil {
+		t.Fatal("registered multi-host agent could not open its picker without live endpoints")
+	}
+	if m.fAgentHost != "10.0.0.2" {
+		t.Fatalf("offline host picker selected %q", m.fAgentHost)
+	}
+}
+
+func TestHermesAllWorkersStartsOneTelegramGateway(t *testing.T) {
+	m := newModel("http://10.0.0.1:40114", "rocky", "pw")
+	m.token = "tok"
+	m.hermesCfg = hermesSettings{GatewayEnabled: true, TelegramBotToken: "bot-token"}
+	a := mustAgent(t, "Hermes")
+	scripts := m.agentDeployScripts(a, []string{"10.0.0.2", "10.0.0.3"})
+	if !strings.Contains(scripts["10.0.0.2"], "gateway install") {
+		t.Fatal("primary Hermes worker did not receive gateway setup")
+	}
+	if strings.Contains(scripts["10.0.0.3"], "gateway install") {
+		t.Fatal("secondary Hermes worker received duplicate gateway setup")
+	}
+}
+
+func TestCrushConfigAndUninstallProtectSupportedPlatforms(t *testing.T) {
+	if !strings.Contains(crushMergePy, "json.load(sys.stdin)") || !strings.Contains(crushMergePy, "os.chmod(base, 0o600)") {
+		t.Fatal("remote Crush config merge does not privately consume and protect credentials")
+	}
+	uninstall := agentUninstallScript(mustAgent(t, "Crush"))
+	for _, want := range []string{"apt-get remove -y crush", "dnf remove -y crush", "yum remove -y crush"} {
+		if !strings.Contains(uninstall, want) {
+			t.Errorf("Crush uninstall missing %q", want)
 		}
 	}
 }

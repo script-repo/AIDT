@@ -207,7 +207,8 @@ python scripts/nutanix_olla_vm.py pattern-custom \
 After a custom setup command completes successfully, its service URL is saved
 in `~/.ai-deployment-toolkit/tui.json` and appears in Services. Failed installs
 do not register a URL. Gateway and Ollama worker URLs are derived live rather
-than persisted.
+than persisted. When Prism inventory is available, the gateway service uses its
+VM name (for example, `aidt-gateway-03`) instead of a generic label.
 
 ### Local Olla Installation
 
@@ -273,25 +274,26 @@ feature and is covered by the security backlog in `FINDINGS.md`.
 
 The current catalog contains:
 
-- **Crush**: installed on the gateway and configured to use the Olla OpenAI
-  endpoint for the whole worker pool.
-- **OpenCode**: installed on the gateway with an AIDT-owned provider config that
-  selects Olla and the current default model.
-- **Goose**: installed on the gateway with an Olla custom provider using its
-  official OpenAI-compatible provider format.
-- **Grok Build**: installed on the gateway from xAI's official installer with
-  an isolated `GROK_HOME` that selects Olla by default.
-- **Claude Code**: installed on the gateway and launched through Olla's
-  Anthropic Messages API translator using the current default model.
-- **Hermes**: installed on a selected worker and configured to use Olla as a
-  custom provider. Optional Telegram gateway settings are available.
+- **Crush**: configured to use the Olla OpenAI endpoint for the whole worker
+  pool.
+- **OpenCode**: uses an AIDT-owned provider config that selects Olla and the
+  current default model.
+- **Goose**: uses an Olla custom provider through its official OpenAI-compatible
+  provider format.
+- **Grok Build**: installed from xAI's official installer with an isolated
+  `GROK_HOME` that selects Olla by default.
+- **Claude Code**: launched through Olla's Anthropic Messages API translator
+  using the current default model.
+- **Hermes**: configured to use Olla as a custom provider. Optional Telegram
+  gateway settings are available.
 
-Press `d` in the Agents section to deploy the selected agent. Press `Enter` or
-`o` to open it over SSH. Removal uninstalls the selected agent from its
-registered hosts. Removing a gateway or worker VM through AIDT also clears any
-agent registrations on that host. If a host was already deleted externally,
-Remove still clears the stale registration and reports remote cleanup as
-unconfirmed.
+Press `d` in the Agents section to deploy the selected agent, then choose one
+worker or all discovered workers. Press `Enter` or `o` to choose and open a
+registered installation over SSH. Removal uninstalls the selected agent from
+one or all registered hosts. Removing a gateway or worker VM through AIDT also
+clears any agent registrations on that host. If a host was already deleted
+externally, Remove still clears the stale registration and reports remote
+cleanup as unconfirmed.
 
 Crush normally inventories its current directory at startup to build project
 context. AIDT launches it in the dedicated

@@ -121,6 +121,10 @@ func (m *model) runSelectedUpdate() tea.Cmd {
 // startUpdatePlan streams a list of steps into the Output pane, reusing the
 // proc-stream pipeline (procCh / handleProc) the Nutanix section uses.
 func (m *model) startUpdatePlan(steps []updateStep, label string) tea.Cmd {
+	if m.agentBusy {
+		m.notice = "wait for the active agent deployment or removal to finish"
+		return nil
+	}
 	if m.procBusy {
 		m.notice = "a task is already running"
 		return nil

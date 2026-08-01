@@ -26,7 +26,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			connectedMsg, localOllaFoundMsg, statusMsg, modelsMsg, vmsMsg,
 			chatEvMsg, pullEvMsg, procEvMsg, nextNameMsg,
 			sshResultMsg, endpointsMsg, notifyMsg, tea.WindowSizeMsg,
-			agentRemovedMsg:
+			agentRemovedMsg, agentBatchDeployedMsg:
 			// handled normally below
 		default:
 			return m.updateForm(msg)
@@ -98,9 +98,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.notice = "connected to " + msg.gateway
 		m.refreshServices()
 		cmds := []tea.Cmd{statusCmd(m.client), modelsCmd(m.client)}
-		if h := hostFromURL(msg.gateway); h != "" && m.sshPass != "" {
+		if h := hostFromURL(msg.gateway); h != "" && (m.sshPass != "" || managedKeyPath() != "") {
 			cmds = append(cmds, endpointsCmd(h, orDefault(m.sshUser, "rocky"), m.sshPass))
-			cmds = append(cmds, keyInstallCmd(h, orDefault(m.sshUser, "rocky"), m.sshPass))
+			if m.sshPass != "" {
+				cmds = append(cmds, keyInstallCmd(h, orDefault(m.sshUser, "rocky"), m.sshPass))
+			}
 		}
 		return m, tea.Batch(cmds...)
 
@@ -118,7 +120,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// restore the banner and refresh models/endpoints we may have missed.
 			m.connInfo = orDefault(m.connVer, "connected to "+m.gateway)
 			cmds := []tea.Cmd{modelsCmd(m.client)}
-			if h := hostFromURL(m.gateway); h != "" && m.sshPass != "" {
+			if h := hostFromURL(m.gateway); h != "" && (m.sshPass != "" || managedKeyPath() != "") {
 				cmds = append(cmds, endpointsCmd(h, orDefault(m.sshUser, "rocky"), m.sshPass))
 			}
 			return m, tea.Batch(cmds...)
@@ -162,6 +164,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.vms = msg.vms
 		m.refreshVMs()
 		m.refreshPool()
+		m.refreshServices()
 		return m, nil
 
 	case chatEvMsg:
@@ -239,7 +242,39 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.notice = msg.agent + " registered on " + msg.host
 		return m, nil
 
+	case agentBatchDeployedMsg:
+		m.agentBusy = false
+		if len(msg.okHosts) > 0 {
+			if m.agentReg == nil {
+				m.agentReg = map[string]string{}
+			}
+			if m.agentHosts == nil {
+				m.agentHosts = map[string][]string{}
+			}
+			for _, host := range msg.okHosts {
+				if !containsStr(m.agentHosts[msg.agent], host) {
+					m.agentHosts[msg.agent] = append(m.agentHosts[msg.agent], host)
+				}
+			}
+			sort.Strings(m.agentHosts[msg.agent])
+			if !containsStr(m.agentHosts[msg.agent], m.agentReg[msg.agent]) {
+				m.agentReg[msg.agent] = m.agentHosts[msg.agent][0]
+			}
+			_ = saveAgentReg(m.tokFile, m.agentReg, m.agentHosts)
+			m.refreshAgents()
+		}
+		if len(msg.errs) > 0 {
+			m.notice = fmt.Sprintf("%s deployed on %d worker(s); failed: %s", msg.agent, len(msg.okHosts), strings.Join(msg.errs, "; "))
+		} else {
+			m.notice = fmt.Sprintf("%s deployed on all %d worker(s)", msg.agent, len(msg.okHosts))
+		}
+		if msg.gatewayHost != "" {
+			m.notice += "; Telegram gateway on " + msg.gatewayHost
+		}
+		return m, nil
+
 	case agentRemovedMsg:
+		m.agentBusy = false
 		forgetHosts := msg.attemptedHosts
 		if len(forgetHosts) == 0 {
 			forgetHosts = msg.okHosts
@@ -302,6 +337,9 @@ func (m model) updateForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case huh.StateAborted:
 		if m.modal == modalCustomWorker {
 			m.pendingCustom = nil
+		}
+		if m.modal == modalAgentHost {
+			m.pendingAgentHosts = nil
 		}
 		m.form = nil
 		m.modal = modalNone
@@ -607,7 +645,7 @@ func (m model) handleContentKey(msg tea.KeyMsg, k string) (tea.Model, tea.Cmd) {
 			if m.client != nil {
 				cmds = append(cmds, statusCmd(m.client))
 			}
-			if h := hostFromURL(m.gateway); h != "" && m.sshPass != "" {
+			if h := hostFromURL(m.gateway); h != "" && (m.sshPass != "" || managedKeyPath() != "") {
 				cmds = append(cmds, endpointsCmd(h, orDefault(m.sshUser, "rocky"), m.sshPass))
 			}
 			return m, tea.Batch(cmds...)
@@ -653,7 +691,7 @@ func (m model) handleContentKey(msg tea.KeyMsg, k string) (tea.Model, tea.Cmd) {
 		case "x", "delete":
 			return m, m.removeSelectedAgent()
 		case "r":
-			if h := hostFromURL(m.gateway); h != "" && m.sshPass != "" {
+			if h := hostFromURL(m.gateway); h != "" && (m.sshPass != "" || managedKeyPath() != "") {
 				return m, endpointsCmd(h, orDefault(m.sshUser, "rocky"), m.sshPass)
 			}
 			return m, nil
@@ -1202,34 +1240,39 @@ func (m *model) refreshAgents() {
 	items := make([]list.Item, 0, len(agentCatalog))
 	for _, a := range agentCatalog {
 		host, reg := m.agentReg[a.name]
+		count := len(m.agentDeployedHosts(a.name))
 		items = append(items, agentItem{
 			name: a.name, cli: a.cli, target: a.target, endpoint: a.endpoint,
-			desc: a.desc, canDeploy: a.deployable, registered: reg, regHost: host,
+			desc: a.desc, canDeploy: a.deployable, registered: reg, regHost: host, regCount: count,
 		})
 	}
 	m.agentsList.SetItems(items)
 }
 
-// openSelectedAgent launches an agent's CLI. Worker agents prompt for the target
-// worker (or reuse the registered one); Crush goes straight to the gateway.
+// openSelectedAgent launches on the registered worker, or prompts when the agent
+// is installed on several workers.
 func (m *model) openSelectedAgent() tea.Cmd {
+	if m.agentBusy || m.procBusy {
+		m.notice = "wait for the active deployment, removal, or update to finish"
+		return nil
+	}
 	it, ok := m.agentsList.SelectedItem().(agentItem)
 	if !ok {
 		m.notice = "select an agent"
 		return nil
 	}
 	a, _ := agentByName(it.name)
-	if a.target == "worker" {
-		if h, reg := m.agentReg[a.name]; reg && h != "" {
-			return m.startAgent(a, "open", h)
-		}
+	hosts := m.agentDeployedHosts(a.name)
+	if len(hosts) == 1 {
+		return m.startAgent(a, "open", hosts[0])
+	}
+	if len(hosts) > 1 {
 		return m.openAgentHostPick(a.name, "open")
 	}
-	return m.startAgent(a, "open", m.agentHost(a))
+	return m.openAgentHostPick(a.name, "open")
 }
 
-// deploySelectedAgent installs + onboards an agent. Worker agents prompt for the
-// target worker so the user can choose where it lands.
+// deploySelectedAgent always prompts for one worker or all known workers.
 func (m *model) deploySelectedAgent() tea.Cmd {
 	it, ok := m.agentsList.SelectedItem().(agentItem)
 	if !ok {
@@ -1237,20 +1280,39 @@ func (m *model) deploySelectedAgent() tea.Cmd {
 		return nil
 	}
 	a, _ := agentByName(it.name)
+	if m.agentBusy || m.procBusy {
+		m.notice = "wait for the active deployment, removal, or update to finish"
+		return nil
+	}
 	if !a.deployable {
 		m.notice = a.name + " needs no deploy — press enter/o to launch it"
 		return nil
 	}
-	// Agents on the local Olla host (e.g. after "install Olla here") run
-	// directly, so no SSH password is needed for them.
-	if m.sshPass == "" && !isLocalHost(m.agentHost(a)) {
+	hosts := m.agentWorkerHosts()
+	if len(hosts) == 0 {
+		m.notice = "no workers known — open Pool and press r first"
+		return nil
+	}
+	needsRemoteAuth := false
+	for _, host := range hosts {
+		if !isLocalHost(host) {
+			needsRemoteAuth = true
+			break
+		}
+	}
+	if needsRemoteAuth && m.sshPass == "" && managedKeyPath() == "" {
 		m.notice = "set an SSH password (reconnect) to deploy agents"
 		return nil
 	}
-	if a.target == "worker" {
-		return m.openAgentHostPick(a.name, "deploy")
+	return m.openAgentHostPick(a.name, "deploy")
+}
+
+func (m *model) agentWorkerHosts() []string {
+	var hosts []string
+	for _, w := range uniqueWorkerRefs(workersFromEndpoints(m.endpoints)) {
+		hosts = append(hosts, w.host)
 	}
-	return m.startAgent(a, "deploy", m.agentHost(a))
+	return hosts
 }
 
 // agentDeployedHosts returns every host an agent is registered as deployed on.
@@ -1266,6 +1328,10 @@ func (m *model) agentDeployedHosts(name string) []string {
 // install (host) to uninstall; Nanoclaw first refreshes its live container
 // inventory, then offers a per-instance picker.
 func (m *model) removeSelectedAgent() tea.Cmd {
+	if m.agentBusy || m.procBusy {
+		m.notice = "wait for the active deployment, removal, or update to finish"
+		return nil
+	}
 	it, ok := m.agentsList.SelectedItem().(agentItem)
 	if !ok {
 		m.notice = "select an agent to remove"
@@ -1337,6 +1403,46 @@ func (m *model) startAgent(a agentDef, act, host string) tea.Cmd {
 		return configuredAgentCmd(m.sshUser, host, m.sshPass, "set -e\n"+config+m.agentOpenCmd(a)+"\n", a.name)
 	}
 	return prepAgentCmd(m.sshUser, host, m.sshPass, m.agentOpenCmd(a), a.name)
+}
+
+func (m *model) startAgentMany(a agentDef, hosts []string) tea.Cmd {
+	if len(hosts) == 0 {
+		m.notice = "no workers known — open Pool and press r first"
+		return nil
+	}
+	scripts := m.agentDeployScripts(a, hosts)
+	opts := agentBatchDeployOptions{scripts: scripts, crushConfig: m.crushConfigJSON()}
+	m.notice = fmt.Sprintf("deploying %s on all %d workers…", a.name, len(hosts))
+	if a.name == "Hermes" && m.hermesGatewayWanted() && len(hosts) > 1 {
+		m.notice = fmt.Sprintf("deploying %s on all %d workers (Telegram gateway on %s)…", a.name, len(hosts), hosts[0])
+		opts.gatewayHost = hosts[0]
+		opts.gatewayFallback = "set -e\n" + m.hermesGatewayScript()
+	}
+	m.agentBusy = true
+	return agentDeployManyCmd(
+		a,
+		hosts,
+		orDefault(m.sshUser, "rocky"),
+		m.sshPass,
+		opts,
+	)
+}
+
+func (m *model) agentDeployScripts(a agentDef, hosts []string) map[string]string {
+	scripts := make(map[string]string, len(hosts))
+	defaultScript := m.agentDeployScript(a)
+	for _, host := range hosts {
+		scripts[host] = defaultScript
+	}
+	if a.name == "Hermes" && m.hermesGatewayWanted() && len(hosts) > 1 {
+		withoutGateway := *m
+		withoutGateway.hermesCfg.GatewayEnabled = false
+		workerScript := withoutGateway.agentDeployScript(a)
+		for _, host := range hosts[1:] {
+			scripts[host] = workerScript
+		}
+	}
+	return scripts
 }
 
 func (m *model) deleteSelectedVM() tea.Cmd {

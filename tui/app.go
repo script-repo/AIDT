@@ -172,17 +172,18 @@ type model struct {
 	vmImages  map[string]string
 	imageByID map[string]string
 
-	// agent registrations: agentReg holds the most recent deploy host per agent
-	// (drives the ✓ badge / open-target), agentHosts every host it was ever
-	// deployed on (drives updates for multi-worker agents like Nanoclaw).
-	agentReg       map[string]string
-	agentHosts     map[string][]string
-	pendingAgent   string // agent awaiting host pick
-	pendingAct     string // "open" | "deploy"
-	agentInstances int    // container count for the next containerized-agent deploy
-	chatVP         viewport.Model
-	logVP          viewport.Model
-	composer       textarea.Model
+	// agent registrations: agentReg holds the preferred open host per agent;
+	// agentHosts tracks every worker where it is installed.
+	agentReg          map[string]string
+	agentHosts        map[string][]string
+	pendingAgent      string   // agent awaiting host pick
+	pendingAct        string   // "open" | "deploy"
+	pendingAgentHosts []string // worker snapshot shown by the deploy picker
+	agentBusy         bool     // a multi-worker deployment or removal is running
+	agentInstances    int      // container count for the next containerized-agent deploy
+	chatVP            viewport.Model
+	logVP             viewport.Model
+	composer          textarea.Model
 
 	// chat
 	chatModel       string
@@ -570,6 +571,12 @@ type consoleReadyMsg struct {
 type agentRegisteredMsg struct {
 	agent string
 	host  string
+}
+type agentBatchDeployedMsg struct {
+	agent       string
+	okHosts     []string
+	errs        []string
+	gatewayHost string
 }
 type notifyMsg string
 

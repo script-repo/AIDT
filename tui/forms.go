@@ -494,22 +494,52 @@ func (m *model) openCustomWorkerPick(cfg customDeploy) tea.Cmd {
 	return m.form.Init()
 }
 
-// openAgentHostPick lets the user choose which worker an agent is opened/deployed
-// on (item: "specify the worker that hermes or openclaw is deployed on").
+// openAgentHostPick lets the user choose one worker, or every worker for deploys.
 func (m *model) openAgentHostPick(agentName, act string) tea.Cmd {
-	ws := workersFromEndpoints(m.endpoints)
+	ws := uniqueWorkerRefs(workersFromEndpoints(m.endpoints))
+	if act == "open" {
+		deployed := m.agentDeployedHosts(agentName)
+		if len(deployed) > 0 {
+			byHost := map[string]workerRef{}
+			for _, w := range ws {
+				byHost[w.host] = w
+			}
+			ws = ws[:0]
+			for _, host := range deployed {
+				w, ok := byHost[host]
+				if !ok {
+					w = workerRef{name: host, host: host}
+				}
+				ws = append(ws, w)
+			}
+		}
+	}
 	if len(ws) == 0 {
 		m.notice = "no workers known — open Pool and press r first"
 		return nil
 	}
 	m.pendingAgent, m.pendingAct = agentName, act
-	m.fAgentHost = ws[0].host
-	if h, ok := m.agentReg[agentName]; ok && h != "" {
-		m.fAgentHost = h
+	m.pendingAgentHosts = nil
+	if act == "deploy" {
+		for _, w := range ws {
+			m.pendingAgentHosts = append(m.pendingAgentHosts, w.host)
+		}
 	}
-	opts := make([]huh.Option[string], 0, len(ws))
+	m.fAgentHost = ws[0].host
+	if h := m.agentReg[agentName]; h != "" {
+		for _, w := range ws {
+			if w.host == h {
+				m.fAgentHost = h
+				break
+			}
+		}
+	}
+	opts := make([]huh.Option[string], 0, len(ws)+1)
 	for _, w := range ws {
 		opts = append(opts, huh.NewOption(w.name+"  ("+w.host+")", w.host))
+	}
+	if act == "deploy" && len(ws) > 1 {
+		opts = append(opts, huh.NewOption(fmt.Sprintf("All worker nodes (%d)", len(ws)), "all"))
 	}
 	verb := act
 	if verb != "" {
@@ -696,7 +726,13 @@ func (m *model) onFormComplete() tea.Cmd {
 		if !ok {
 			return nil
 		}
-		return m.startAgent(a, m.pendingAct, orDefault(m.fstr("agenthost"), m.fAgentHost))
+		target := orDefault(m.fstr("agenthost"), m.fAgentHost)
+		if m.pendingAct == "deploy" && target == "all" {
+			hosts := append([]string(nil), m.pendingAgentHosts...)
+			m.pendingAgentHosts = nil
+			return m.startAgentMany(a, hosts)
+		}
+		return m.startAgent(a, m.pendingAct, target)
 
 	case modalAgentRemove:
 		a, ok := agentByName(m.pendingAgent)
@@ -714,6 +750,7 @@ func (m *model) onFormComplete() tea.Cmd {
 			return nil
 		}
 		m.notice = fmt.Sprintf("uninstalling %s on %d host(s)…", a.name, len(hosts))
+		m.agentBusy = true
 		return agentUninstallCmd(a, hosts, user, m.sshPass)
 
 	case modalHermesCfg:

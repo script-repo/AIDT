@@ -47,7 +47,7 @@ func (m *model) refreshServices() {
 		items = append(items, i)
 	}
 	if m.gateway != "" {
-		add(serviceItem{name: "Olla gateway", target: hostFromURL(m.gateway), url: m.gateway, kind: "gateway"})
+		add(serviceItem{name: m.gatewayServiceName(), target: hostFromURL(m.gateway), url: m.gateway, kind: "gateway"})
 	}
 	for _, e := range m.endpoints {
 		add(serviceItem{name: e.Name, target: hostFromURL(e.URL), url: e.URL, kind: "Ollama worker"})
@@ -56,6 +56,22 @@ func (m *model) refreshServices() {
 		add(serviceItem{name: s.Name, target: s.Target, url: s.URL, kind: "custom service"})
 	}
 	m.servicesList.SetItems(items)
+}
+
+func (m *model) gatewayServiceName() string {
+	host := hostFromURL(m.gateway)
+	for _, vm := range m.vms {
+		if vm.Role != "gateway" {
+			continue
+		}
+		if vm.IP == host || strings.EqualFold(vm.Name, host) {
+			return vm.Name
+		}
+	}
+	if strings.HasPrefix(strings.ToLower(host), "aidt-gateway-") {
+		return host
+	}
+	return "Olla gateway"
 }
 
 func (m *model) selectedService() (serviceItem, bool) {

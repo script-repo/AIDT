@@ -181,18 +181,14 @@ const crushOpenCommand = `mkdir -p "$HOME/.ai-deployment-toolkit/crush-workspace
 
 // agentCatalog is the set of agents offered in the Agents section.
 //
-//   - Crush runs on the Olla server and talks to the Olla OpenAI endpoint (so it
-//     load-balances across the whole worker pool). Installed from the Charm repo;
-//     its provider config is written to ~/.config/crush/crush.json.
-//   - OpenCode, Goose, Grok Build, and Claude Code run on the gateway and use
-//     Olla as their default model provider.
-//   - Hermes runs on a selected worker and uses Olla as a custom provider.
+// All agents deploy to one or every selected worker and reach models through the
+// Olla gateway, which load-balances across the whole pool.
 var agentCatalog = []agentDef{
 	{
 		name:       "Crush",
 		cli:        "crush",
 		deployable: true,
-		target:     "gateway",
+		target:     "worker",
 		endpoint:   "Olla OpenAI endpoint (whole pool)",
 		desc:       "Charm coding agent",
 	},
@@ -200,7 +196,7 @@ var agentCatalog = []agentDef{
 		name:       "OpenCode",
 		cli:        "opencode",
 		deployable: true,
-		target:     "gateway",
+		target:     "worker",
 		endpoint:   "Olla OpenAI endpoint (whole pool)",
 		desc:       "Open-source coding agent",
 	},
@@ -208,7 +204,7 @@ var agentCatalog = []agentDef{
 		name:       "Goose",
 		cli:        "goose session",
 		deployable: true,
-		target:     "gateway",
+		target:     "worker",
 		endpoint:   "Olla OpenAI endpoint (whole pool)",
 		desc:       "AAIF open-source AI agent",
 	},
@@ -216,7 +212,7 @@ var agentCatalog = []agentDef{
 		name:       "Grok Build",
 		cli:        "grok",
 		deployable: true,
-		target:     "gateway",
+		target:     "worker",
 		endpoint:   "Olla OpenAI endpoint (whole pool)",
 		desc:       "xAI terminal coding agent",
 	},
@@ -224,7 +220,7 @@ var agentCatalog = []agentDef{
 		name:       "Claude Code",
 		cli:        "claude",
 		deployable: true,
-		target:     "gateway",
+		target:     "worker",
 		endpoint:   "Olla Anthropic endpoint (whole pool)",
 		desc:       "Anthropic coding agent",
 	},
@@ -754,7 +750,16 @@ func agentUninstallScript(a agentDef) string {
 	switch a.name {
 	case "Crush":
 		return `echo "[remove] uninstalling crush…"
-sudo dnf -y remove crush 2>/dev/null || true
+if [ "$(id -u)" -eq 0 ]; then SUDO=""; else SUDO="sudo"; fi
+. /etc/os-release 2>/dev/null || true
+case "${ID:-} ${ID_LIKE:-}" in
+  *ubuntu*|*debian*) $SUDO apt-get remove -y crush 2>/dev/null || true ;;
+  *)
+    if command -v dnf >/dev/null 2>&1; then $SUDO dnf remove -y crush 2>/dev/null || true
+    elif command -v yum >/dev/null 2>&1; then $SUDO yum remove -y crush 2>/dev/null || true
+    fi
+    ;;
+esac
 export PATH="$HOME/.npm-global/bin:$PATH"
 npm uninstall -g crush >/dev/null 2>&1 || true
 rm -f "$HOME/.local/bin/crush"
@@ -866,8 +871,6 @@ func agentUninstallCmd(a agentDef, hosts []string, user, pass string) tea.Cmd {
 				case isLocalHost(h):
 					b, e := exec.Command("bash", "-lc", script).CombinedOutput()
 					out, err = string(b), e
-				case pass == "":
-					err = fmt.Errorf("no SSH password configured")
 				default:
 					client, e := dialSSH(h, user, pass)
 					if e != nil {
@@ -891,6 +894,85 @@ func agentUninstallCmd(a agentDef, hosts []string, user, pass string) tea.Cmd {
 		sort.Strings(msg.okHosts)
 		sort.Strings(msg.errs)
 		msg.removed = len(msg.okHosts)
+		return msg
+	}
+}
+
+// agentDeployManyCmd runs the headless deployment on every selected worker in
+// parallel. Successful hosts are registered even when another worker fails.
+type agentBatchDeployOptions struct {
+	scripts         map[string]string
+	crushConfig     string
+	gatewayHost     string
+	gatewayFallback string
+}
+
+func runAgentDeployScript(host, user, pass, script string) (string, error) {
+	if isLocalHost(host) {
+		cmd := exec.Command("bash", "-l", "-s")
+		cmd.Stdin = strings.NewReader(script)
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+	client, err := dialSSH(host, user, pass)
+	if err != nil {
+		return "", err
+	}
+	defer client.Close()
+	return runSSHInput(client, "bash -l -s", script)
+}
+
+func agentDeployManyCmd(a agentDef, hosts []string, user, pass string, opts agentBatchDeployOptions) tea.Cmd {
+	return func() tea.Msg {
+		msg := agentBatchDeployedMsg{agent: a.name}
+		var mu sync.Mutex
+		var wg sync.WaitGroup
+		for _, host := range hosts {
+			host := host
+			script := opts.scripts[host]
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				var out string
+				var err error
+				if a.name == "Crush" {
+					if isLocalHost(host) {
+						err = localMergeCrushConfig(opts.crushConfig)
+					} else {
+						err = sshMergeCrushConfig(host, user, pass, opts.crushConfig)
+					}
+				}
+				if err == nil && script == "" {
+					err = fmt.Errorf("no deployment script generated")
+				}
+				if err == nil {
+					out, err = runAgentDeployScript(host, user, pass, script)
+				}
+				mu.Lock()
+				defer mu.Unlock()
+				if err != nil {
+					msg.errs = append(msg.errs, host+": "+strings.TrimSpace(err.Error()+" "+lastNonEmptyLine(out)))
+					return
+				}
+				msg.okHosts = append(msg.okHosts, host)
+			}()
+		}
+		wg.Wait()
+		sort.Strings(msg.okHosts)
+		if opts.gatewayFallback != "" {
+			if containsStr(msg.okHosts, opts.gatewayHost) {
+				msg.gatewayHost = opts.gatewayHost
+			} else if len(msg.okHosts) > 0 {
+				fallbackHost := msg.okHosts[0]
+				out, err := runAgentDeployScript(fallbackHost, user, pass, opts.gatewayFallback)
+				if err != nil {
+					msg.errs = append(msg.errs, fallbackHost+" Telegram gateway: "+strings.TrimSpace(err.Error()+" "+lastNonEmptyLine(out)))
+				} else {
+					msg.gatewayHost = fallbackHost
+				}
+			}
+		}
+		sort.Strings(msg.errs)
 		return msg
 	}
 }
