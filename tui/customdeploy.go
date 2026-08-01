@@ -1,11 +1,29 @@
 package main
 
 import (
+	"fmt"
+	"net"
+	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
 )
+
+const (
+	np4mInstall = "curl -fsSL https://raw.githubusercontent.com/script-repo/ntnx-np4m/main/install.sh | sudo bash"
+	nrccInstall = "curl -fsSL https://raw.githubusercontent.com/script-repo/ntnx-console-client/main/install.sh | NRCC_NO_OPEN=1 bash"
+	nrccLegacy  = "curl -fsSL https://raw.githubusercontent.com/script-repo/ntnx-console-client/main/install.sh | bash"
+)
+
+// customRun tracks a custom deployment until its setup command completes. A
+// service URL is persisted only after a successful terminal ProcEvent.
+type customRun struct {
+	cfg    customDeploy
+	target string
+	url    string
+}
 
 // customItem is a row in the Nutanix "custom deployments" submenu: either the
 // special "add deployment" action (add=true) or one saved deployment type.
@@ -50,23 +68,61 @@ func (c customDeploy) accessURL(ip string) string {
 	if c.Port == "" || ip == "" {
 		return ""
 	}
+	port, err := strconv.Atoi(c.Port)
+	if err != nil || port < 1 || port > 65535 {
+		return ""
+	}
 	scheme := c.Scheme
 	if scheme == "" {
 		scheme = "http"
+	}
+	if scheme != "http" && scheme != "https" {
+		return ""
 	}
 	path := c.Path
 	if path != "" && !strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}
-	return scheme + "://" + ip + ":" + c.Port + path
+	host := strings.Trim(strings.TrimSpace(ip), "[]")
+	return (&url.URL{Scheme: scheme, Host: net.JoinHostPort(host, c.Port), Path: path}).String()
 }
 
 // defaultCustomDeploys are the built-in deployment types seeded on first run.
 func defaultCustomDeploys() []customDeploy {
 	return []customDeploy{
-		{Name: "NP4M", ScriptURL: "curl -fsSL https://raw.githubusercontent.com/script-repo/ntnx-np4m/main/install.sh | sudo bash"},
-		{Name: "NRCC", ScriptURL: "curl -fsSL https://raw.githubusercontent.com/script-repo/ntnx-console-client/main/install.sh | bash"},
+		{Name: "NP4M", ScriptURL: np4mInstall, Scheme: "https", Port: "8443"},
+		{Name: "NRCC", ScriptURL: nrccInstall, Scheme: "https", Port: "8443"},
 	}
+}
+
+// migrateBuiltinCustomDeploys adds service metadata to exact built-in entries
+// seeded by older AIDT releases without overwriting user-authored definitions.
+func migrateBuiltinCustomDeploys(in []customDeploy) ([]customDeploy, bool) {
+	out := append([]customDeploy(nil), in...)
+	changed := false
+	for i := range out {
+		c := &out[i]
+		builtin := c.Name == "NP4M" && c.ScriptURL == np4mInstall
+		if c.Name == "NRCC" && (c.ScriptURL == nrccLegacy || c.ScriptURL == nrccInstall) {
+			builtin = true
+			if c.ScriptURL == nrccLegacy {
+				c.ScriptURL = nrccInstall
+				changed = true
+			}
+		}
+		if !builtin {
+			continue
+		}
+		if c.Scheme == "" {
+			c.Scheme = "https"
+			changed = true
+		}
+		if c.Port == "" {
+			c.Port = "8443"
+			changed = true
+		}
+	}
+	return out, changed
 }
 
 // refreshCustomList rebuilds the submenu: the "add deployment" row first, then
@@ -144,14 +200,111 @@ func (m *model) deploySelectedCustom() tea.Cmd {
 		m.notice = "set " + strings.Join(missing, ", ") + " in Nutanix settings first"
 		return m.openNutanixCfg()
 	}
-	args := []string{"pattern-custom", "--script-url", it.url, "--name-prefix", slugifyName(it.name) + "-"}
+	cfg := it.cfg()
+	args := []string{"pattern-custom", "--script-url", customCommand(cfg), "--name-prefix", slugifyName(it.name) + "-"}
 	args = append(args, m.deployFlags()...)
 	// Remember the workload's access config so we can show a clickable link once
 	// the VM's IP is reported.
-	cfg := it.cfg()
-	m.pendingCustom = &cfg
+	m.pendingCustom = &customRun{cfg: cfg}
 	m.notice = "deploying " + it.name + " — provisioning VM, then running setup script (see Output)"
 	return m.startProc(args, "deploy "+it.name)
+}
+
+// deploySelectedCustomToWorker opens a picker for installing the highlighted
+// custom workload on a worker that is already registered with Olla.
+func (m *model) deploySelectedCustomToWorker() tea.Cmd {
+	it, ok := m.customList.SelectedItem().(customItem)
+	if !ok || it.add {
+		m.notice = "select a saved custom deployment first"
+		return nil
+	}
+	if m.procBusy {
+		m.notice = "a deploy/delete is already running"
+		return nil
+	}
+	return m.openCustomWorkerPick(it.cfg())
+}
+
+// startCustomOnWorker runs a custom setup command on an existing worker through
+// the managed SSH-key update-plan runner, without provisioning another VM.
+func (m *model) startCustomOnWorker(cfg customDeploy, worker workerRef) tea.Cmd {
+	if m.procBusy {
+		m.notice = "a deploy/delete is already running"
+		return nil
+	}
+	port, err := m.allocateServicePort(cfg.Name, worker.host, cfg.Port)
+	if err != nil {
+		m.notice = err.Error()
+		return nil
+	}
+	cfg.Port = port
+	access := cfg.accessURL(worker.host)
+	m.pendingCustom = &customRun{cfg: cfg, target: worker.name, url: access}
+	m.procBusy = true
+	m.section = secNutanix
+	m.nutanixCustom = true
+	m.logLines = append(m.logLines, fmt.Sprintf(">>> deploy %s on existing worker %s (%s)", cfg.Name, worker.name, worker.host))
+	m.renderLog()
+	m.procCh = make(chan ProcEvent, 128)
+	step := updateStep{
+		title:  "Deploy " + cfg.Name + " on " + worker.name,
+		host:   worker.host,
+		user:   orDefault(m.sshUser, "rocky"),
+		pass:   m.sshPass,
+		script: customSetupScript(cfg),
+	}
+	go RunUpdatePlan([]updateStep{step}, m.procCh)
+	m.notice = "deploying " + cfg.Name + " on existing worker " + worker.name + " — see Output"
+	return waitProc(m.procCh)
+}
+
+// customSetupScript mirrors the Python custom installer for an existing host.
+// Bare HTTP(S) URLs are downloaded and run with sudo; full commands run as-is
+// with pipefail so a failed download cannot be masked by the final pipeline step.
+func customSetupScript(cfg customDeploy) string {
+	spec := strings.TrimSpace(cfg.ScriptURL)
+	portEnv := ""
+	if cfg.Port != "" {
+		portEnv = "AIDT_SERVICE_PORT=" + cfg.Port + " PORT=" + cfg.Port + " "
+	}
+	if isBareHTTPURL(spec) {
+		q := shSingle(spec)
+		return "set -euo pipefail\n" +
+			"tmp=$(mktemp /tmp/aidt-custom-XXXXXX.sh)\n" +
+			"trap 'rm -f \"$tmp\"' EXIT\n" +
+			"if command -v curl >/dev/null 2>&1; then curl -fsSL '" + q + "' -o \"$tmp\"; " +
+			"elif command -v wget >/dev/null 2>&1; then wget -qO \"$tmp\" '" + q + "'; " +
+			"else echo '[deploy] ERROR: curl or wget is required' >&2; exit 1; fi\n" +
+			"chmod +x \"$tmp\"\n" +
+			"sudo -n env " + portEnv + "bash \"$tmp\"\n"
+	}
+	prefix := ""
+	if cfg.Port != "" {
+		prefix = "export AIDT_SERVICE_PORT=" + cfg.Port + " PORT=" + cfg.Port + "\n"
+	}
+	return "set -euo pipefail\n" + prefix + customCommand(cfg) + "\n"
+}
+
+// customCommand injects the allocated service port into the built-in installers
+// using the environment variables they officially support.
+func customCommand(cfg customDeploy) string {
+	port := orDefault(cfg.Port, "8443")
+	switch {
+	case cfg.Name == "NP4M" && cfg.ScriptURL == np4mInstall:
+		return "curl -fsSL https://raw.githubusercontent.com/script-repo/ntnx-np4m/main/install.sh | sudo env NP4M_PORT=" + port + " bash"
+	case cfg.Name == "NRCC" && (cfg.ScriptURL == nrccInstall || cfg.ScriptURL == nrccLegacy):
+		return "curl -fsSL https://raw.githubusercontent.com/script-repo/ntnx-console-client/main/install.sh | NRCC_NO_OPEN=1 NRCC_PORT=" + port + " bash"
+	default:
+		return cfg.ScriptURL
+	}
+}
+
+func isBareHTTPURL(spec string) bool {
+	if strings.ContainsAny(spec, " \t\r\n") {
+		return false
+	}
+	u, err := url.ParseRequestURI(spec)
+	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
 }
 
 // deleteSelectedCustom removes the highlighted saved deployment type (the "add"

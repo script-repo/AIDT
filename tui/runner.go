@@ -406,7 +406,7 @@ func RunUpdatePlan(steps []updateStep, ch chan<- ProcEvent) {
 }
 
 // nextWorkerNames returns n consecutive VM names starting from base. If base ends
-// in digits (e.g. "ollama-worker-04") the numeric suffix is incremented while
+// in digits (e.g. "aidt-worker-04") the numeric suffix is incremented while
 // preserving zero-pad width; otherwise "-01".."-NN" is appended.
 func nextWorkerNames(base string, n int) []string {
 	if n < 1 {

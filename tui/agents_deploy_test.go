@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -25,6 +26,43 @@ func TestHermesDeployScriptHeadless(t *testing.T) {
 	// Last meaningful action should not be a bare "hermes" line as the only launch.
 	if strings.HasSuffix(strings.TrimSpace(script), "\nhermes") {
 		t.Error("hermes deploy should not exec interactive hermes at the end")
+	}
+}
+
+func TestCrushDeployScriptInstallsDependenciesAndStaysHeadless(t *testing.T) {
+	m := newModel("http://10.0.0.1:40114", "rocky", "pw")
+	m.tokFile = filepath.Join(t.TempDir(), "tui.json")
+	script := m.agentDeployScript(mustAgent(t, "Crush"))
+	for _, want := range []string{
+		"apt-get install -y ca-certificates curl git gnupg",
+		"repo.charm.sh/apt/gpg.key",
+		"dnf",
+		"yum",
+		"repo.charm.sh/yum/",
+		"Crush binary not found after package installation",
+		"Open Crush from Agents",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("crush deploy missing %q", want)
+		}
+	}
+	if strings.HasSuffix(strings.TrimSpace(script), "\ncrush") {
+		t.Error("crush deploy should not launch interactive Crush at the end")
+	}
+}
+
+func TestCrushDeployScriptShellSyntax(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash is unavailable for deployment script syntax validation")
+	}
+	m := newModel("http://10.0.0.1:40114", "rocky", "pw")
+	m.tokFile = filepath.Join(t.TempDir(), "tui.json")
+	script := m.agentDeployScript(mustAgent(t, "Crush"))
+	cmd := exec.Command(bash, "-n")
+	cmd.Stdin = strings.NewReader(script)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("crush deploy script has invalid shell syntax: %v\n%s", err, out)
 	}
 }
 

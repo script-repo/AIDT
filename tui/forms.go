@@ -108,7 +108,7 @@ func (m *model) openEndpoint() tea.Cmd {
 	m.fEpName, m.fEpURL, m.fEpType, m.fEpPrio = "", "", "ollama", "100"
 	m.modal = modalEndpoint
 	m.form = huh.NewForm(huh.NewGroup(
-		huh.NewInput().Key("epname").Title("Endpoint name").Placeholder("ollama-worker-03").Value(&m.fEpName),
+		huh.NewInput().Key("epname").Title("Endpoint name").Placeholder("aidt-worker-03").Value(&m.fEpName),
 		huh.NewInput().Key("epurl").Title("Endpoint URL").Placeholder("http://worker-host:11434").Value(&m.fEpURL),
 		huh.NewSelect[string]().Key("eptype").Title("Type").
 			Options(huh.NewOptions("ollama", "openai", "vllm", "lmstudio")...).Value(&m.fEpType),
@@ -192,7 +192,7 @@ func (m *model) openDeploy(role string) tea.Cmd {
 	m.form = huh.NewForm(huh.NewGroup(
 		huh.NewSelect[string]().Key("role").Title("Role").
 			Options(huh.NewOptions("worker", "gateway")...).Value(&m.fRole),
-		huh.NewInput().Key("vmname").Title("VM name").Description("blank = auto-increment (ollama-worker-NN)").Value(&m.fName),
+		huh.NewInput().Key("vmname").Title("VM name").Description("blank = auto-increment (aidt-worker-NN / aidt-gateway-NN)").Value(&m.fName),
 		huh.NewInput().Key("count").Title("Instances").
 			Description("worker only · number of workers to deploy in parallel").Value(&m.fCount),
 		huh.NewInput().Key("model").Title("Model").Description("worker only · defaults to the current default model").
@@ -446,8 +446,8 @@ func (m *model) openUpdateAllConfirm() tea.Cmd {
 	return m.form.Init()
 }
 
-// openCustomDeploy collects a new custom deployment type: a friendly name and
-// the URL of a setup script run on the VM (curl | sudo bash) after it boots.
+// openCustomDeploy collects a custom workload definition that can run on a new
+// VM or an existing Ollama worker.
 func (m *model) openCustomDeploy() tea.Cmd {
 	m.fCustName, m.fCustURL = "", ""
 	m.fCustScheme, m.fCustPort, m.fCustPath = "http", "", ""
@@ -456,16 +456,40 @@ func (m *model) openCustomDeploy() tea.Cmd {
 		huh.NewInput().Key("custname").Title("Deployment name").
 			Placeholder("e.g. postgres-node").Value(&m.fCustName),
 		huh.NewInput().Key("custurl").Title("Setup script").
-			Description("a URL (downloaded + sudo bash'd) OR a full shell command run on the VM").
+			Description("a URL (downloaded + sudo bash'd) OR a full shell command run on the target").
 			Placeholder("https://example.com/setup.sh  or  curl -fsSL <url> | sudo bash").Value(&m.fCustURL),
 		huh.NewNote().Title("Workload access link (optional)").
-			Description("shown as a clickable link after deploy: <scheme>://<vm-ip>:<port><path>"),
+			Description("saved in Services after success: <scheme>://<target-ip>:<port><path>"),
 		huh.NewSelect[string]().Key("custscheme").Title("Scheme").
 			Options(huh.NewOptions("http", "https")...).Value(&m.fCustScheme),
 		huh.NewInput().Key("custport").Title("Workload port").
 			Placeholder("e.g. 8080").Value(&m.fCustPort),
 		huh.NewInput().Key("custpath").Title("Path").
 			Description("optional, e.g. /dashboard").Value(&m.fCustPath),
+	)).WithWidth(formWidth(m)).WithShowHelp(true).WithTheme(huhTheme()).WithKeyMap(huhKM)
+	return m.form.Init()
+}
+
+// openCustomWorkerPick chooses an existing Ollama worker for a custom workload.
+// The picker doubles as confirmation by showing the exact setup command.
+func (m *model) openCustomWorkerPick(cfg customDeploy) tea.Cmd {
+	workers := workersFromEndpoints(m.endpoints)
+	if len(workers) == 0 {
+		m.notice = "no workers known — open Pool and press r first"
+		return nil
+	}
+	opts := make([]huh.Option[string], 0, len(workers))
+	for _, w := range workers {
+		opts = append(opts, huh.NewOption(w.name+"  ("+w.host+")", w.host))
+	}
+	m.pendingCustom = &customRun{cfg: cfg}
+	m.fCustHost = workers[0].host
+	m.modal = modalCustomWorker
+	m.form = huh.NewForm(huh.NewGroup(
+		huh.NewNote().Title("Deploy "+cfg.Name+" on an existing worker").
+			Description("This installs alongside Ollama on the selected worker. Review the command:\n"+cfg.ScriptURL),
+		huh.NewSelect[string]().Key("custhost").Title("Target worker").
+			Options(opts...).Value(&m.fCustHost),
 	)).WithWidth(formWidth(m)).WithShowHelp(true).WithTheme(huhTheme()).WithKeyMap(huhKM)
 	return m.form.Init()
 }
@@ -798,9 +822,17 @@ func (m *model) onFormComplete() tea.Cmd {
 			m.notice = "deployment name and setup script (URL or command) are required"
 			return nil
 		}
+		port := m.fstr("custport")
+		if port != "" {
+			p, err := strconv.Atoi(port)
+			if err != nil || p < 1 || p > 65535 {
+				m.notice = "workload port must be between 1 and 65535"
+				return nil
+			}
+		}
 		m.customDeploys = append(m.customDeploys, customDeploy{
 			Name: name, ScriptURL: url,
-			Scheme: m.fstr("custscheme"), Port: m.fstr("custport"), Path: m.fstr("custpath"),
+			Scheme: m.fstr("custscheme"), Port: port, Path: m.fstr("custpath"),
 		})
 		_ = saveCustomDeploys(m.tokFile, m.customDeploys)
 		m.refreshCustomList()
@@ -809,6 +841,21 @@ func (m *model) onFormComplete() tea.Cmd {
 		m.customList.Select(len(m.customList.Items()) - 1)
 		m.nutanixCustom = true
 		m.notice = "added custom deployment: " + name + " — press enter to deploy it"
+		return nil
+
+	case modalCustomWorker:
+		if m.pendingCustom == nil {
+			m.notice = "custom deployment selection expired"
+			return nil
+		}
+		host := orDefault(m.fstr("custhost"), m.fCustHost)
+		for _, worker := range workersFromEndpoints(m.endpoints) {
+			if worker.host == host {
+				return m.startCustomOnWorker(m.pendingCustom.cfg, worker)
+			}
+		}
+		m.pendingCustom = nil
+		m.notice = "selected worker is no longer available — refresh Pool and retry"
 		return nil
 	}
 	return nil

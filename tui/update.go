@@ -96,6 +96,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.connInfo = m.connVer
 		m.prevTime = time.Time{}
 		m.notice = "connected to " + msg.gateway
+		m.refreshServices()
 		cmds := []tea.Cmd{statusCmd(m.client), modelsCmd(m.client)}
 		if h := hostFromURL(msg.gateway); h != "" && m.sshPass != "" {
 			cmds = append(cmds, endpointsCmd(h, orDefault(m.sshUser, "rocky"), m.sshPass))
@@ -198,6 +199,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case endpointsMsg:
 		if msg.err == nil {
 			m.endpoints = msg.eps
+			m.refreshServices()
 			return m, m.modelsRefresh()
 		}
 		m.notice = "read endpoints failed: " + msg.err.Error()
@@ -294,6 +296,9 @@ func (m model) updateForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.modal = modalNone
 		return m, tea.Batch(cmd, c)
 	case huh.StateAborted:
+		if m.modal == modalCustomWorker {
+			m.pendingCustom = nil
+		}
 		m.form = nil
 		m.modal = modalNone
 		m.notice = "cancelled"
@@ -331,6 +336,7 @@ func (m *model) applyLayout(w, h int) {
 	m.modelsList.SetSize(m.contentW, listH)
 	m.poolList.SetSize(m.contentW, listH)
 	m.agentsList.SetSize(m.contentW, listH)
+	m.servicesList.SetSize(m.contentW, listH)
 
 	// Size the VM list to show 4 items per page. The default delegate is 3 lines
 	// per item (height 2 + spacing 1); add 2 for the status bar + pagination.
@@ -417,6 +423,8 @@ func (m *model) activeList() *list.Model {
 		return &m.vmsList
 	case secAgents:
 		return &m.agentsList
+	case secServices:
+		return &m.servicesList
 	case secUpdate:
 		return &m.updateList
 	}
@@ -484,6 +492,7 @@ func (m *model) refreshAll() tea.Cmd {
 	if m.pcCfg != nil {
 		cmds = append(cmds, vmsCmd(m.pcCfg))
 	}
+	m.refreshServices()
 	m.notice = "refreshing…"
 	return tea.Batch(cmds...)
 }
@@ -560,6 +569,21 @@ func (m model) handleContentKey(msg tea.KeyMsg, k string) (tea.Model, tea.Cmd) {
 			m.clearToken()
 		}
 		return m, nil
+
+	case secServices:
+		switch k {
+		case "esc", "left", "h":
+			m.leaveContent()
+			return m, nil
+		case "enter", "b":
+			return m, m.openSelectedService()
+		case "r":
+			m.refreshServices()
+			return m, nil
+		}
+		nl, cmd := m.servicesList.Update(msg)
+		m.servicesList = nl
+		return m, cmd
 
 	case secPool:
 		switch k {
@@ -642,6 +666,8 @@ func (m model) handleContentKey(msg tea.KeyMsg, k string) (tea.Model, tea.Cmd) {
 				return m, nil
 			case "enter":
 				return m, m.deploySelectedCustom()
+			case "w":
+				return m, m.deploySelectedCustomToWorker()
 			case "x", "delete":
 				m.deleteSelectedCustom()
 				return m, nil
@@ -1392,7 +1418,7 @@ func (m *model) startLocalOlla() tea.Cmd {
 // startWorkerBatch provisions `count` workers in parallel (pattern-b
 // --no-register), then registers them with the gateway in a single batched pass
 // (see handleBatchDone). Names auto-increment from `name` (or the next free
-// ollama-worker-NN when blank).
+// aidt-worker-NN when blank).
 func (m *model) startWorkerBatch(count int, model, name string) tea.Cmd {
 	if m.procBusy {
 		m.notice = "a deploy/delete is already running"
@@ -1553,14 +1579,11 @@ func (m model) handleProc(ev ProcEvent) (tea.Model, tea.Cmd) {
 			}
 			m.vmImages[name] = image
 			_ = saveVMImages(m.tokFile, m.vmImages)
-			// For a custom deploy with a workload port, surface a clickable link.
+			// Keep the candidate custom-service URL, but do not publish it until
+			// the setup command itself exits successfully.
 			if m.pendingCustom != nil {
-				if url := m.pendingCustom.accessURL(ip); url != "" {
-					m.lastCustomAccess = url
-					m.lastCustomName = name
-					m.logLines = append(m.logLines, "ACCESS  "+name+"  →  "+osc8(url, url)+"  (click, or press b)")
-					m.renderLog()
-				}
+				m.pendingCustom.target = name
+				m.pendingCustom.url = m.pendingCustom.cfg.accessURL(ip)
 			}
 		}
 	}
@@ -1569,11 +1592,16 @@ func (m model) handleProc(ev ProcEvent) (tea.Model, tea.Cmd) {
 			return m.handleBatchDone(ev)
 		}
 		m.procBusy = false
+		custom := m.pendingCustom
 		m.pendingCustom = nil
 		wasLocalOlla := m.localOllaPending
 		m.localOllaPending = false
 		if ev.Code == 0 {
 			m.logLines = append(m.logLines, "<<< done")
+			if custom != nil && custom.url != "" {
+				m.recordCustomService(*custom)
+				m.logLines = append(m.logLines, "ACCESS  "+custom.cfg.Name+" on "+custom.target+"  →  "+osc8(custom.url, custom.url)+"  (click, or open Services)")
+			}
 			if wasLocalOlla {
 				gw := normalizeGateway(LocalOllaURL())
 				m.gateway = gw
@@ -1582,7 +1610,11 @@ func (m model) handleProc(ev ProcEvent) (tea.Model, tea.Cmd) {
 				m.renderLog()
 				return m, connectCmd(gw)
 			}
-			m.notice = "deploy/delete finished"
+			if custom != nil {
+				m.notice = custom.cfg.Name + " deployed successfully"
+			} else {
+				m.notice = "deploy/delete finished"
+			}
 		} else {
 			m.logLines = append(m.logLines, fmt.Sprintf("<<< failed (rc=%d)", ev.Code))
 			if wasLocalOlla {

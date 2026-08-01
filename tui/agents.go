@@ -81,18 +81,64 @@ grep -q '.local/bin' "$HOME/.bashrc" 2>/dev/null || echo 'export PATH="$HOME/.lo
 grep -q '/usr/local/bin' "$HOME/.bashrc" 2>/dev/null || echo 'export PATH="/usr/local/bin:$PATH"' >> "$HOME/.bashrc"
 `
 
-// crushDeployScript installs crush from the Charm yum repo on the Olla server
-// and launches it (the Olla provider config is written separately).
+// crushDeployScript installs Crush from Charm's official package repository on
+// the Olla server. Deployment is intentionally non-interactive; opening Crush
+// is a separate action after a successful install has been registered.
 const crushDeployScript = `set -e
-if ! command -v crush >/dev/null 2>&1; then
-  echo "[deploy] adding Charm repo and installing crush (sudo)…"
-  sudo rpm --import https://repo.charm.sh/yum/gpg.key || true
-  printf '[charm]\nname=Charm\nbaseurl=https://repo.charm.sh/yum/\nenabled=1\ngpgcheck=1\ngpgkey=https://repo.charm.sh/yum/gpg.key\n' | sudo tee /etc/yum.repos.d/charm.repo >/dev/null
-  sudo dnf install -y crush
+export PATH="/usr/local/bin:/usr/bin:$HOME/.local/bin:$PATH"
+. /etc/os-release 2>/dev/null || true
+
+if [ "$(id -u)" -eq 0 ]; then
+  SUDO=""
+elif command -v sudo >/dev/null 2>&1; then
+  SUDO="sudo"
+else
+  echo "[deploy] ERROR: Crush installation requires root or sudo" >&2
+  exit 1
 fi
-echo "[deploy] crush: $(command -v crush)"
-echo "[deploy] launching crush (Olla provider preconfigured)…"
-crush
+
+if ! command -v crush >/dev/null 2>&1; then
+  case "${ID:-} ${ID_LIKE:-}" in
+    *ubuntu*|*debian*)
+      echo "[deploy] installing Crush dependencies with apt…"
+      $SUDO apt-get update -y
+      $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl git gnupg
+      $SUDO mkdir -p /etc/apt/keyrings
+      curl -fsSL https://repo.charm.sh/apt/gpg.key | $SUDO gpg --dearmor --batch --yes -o /etc/apt/keyrings/charm.gpg
+      echo 'deb [signed-by=/etc/apt/keyrings/charm.gpg] https://repo.charm.sh/apt/ * *' | $SUDO tee /etc/apt/sources.list.d/charm.list >/dev/null
+      $SUDO apt-get update -y
+      $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y crush
+      ;;
+    *rocky*|*rhel*|*fedora*|*centos*|*almalinux*)
+      if command -v dnf >/dev/null 2>&1; then
+        PKG=dnf
+      elif command -v yum >/dev/null 2>&1; then
+        PKG=yum
+      else
+        echo "[deploy] ERROR: neither dnf nor yum is available" >&2
+        exit 1
+      fi
+      echo "[deploy] installing Crush dependencies with $PKG…"
+      $SUDO $PKG install -y ca-certificates curl git
+      printf '[charm]\nname=Charm\nbaseurl=https://repo.charm.sh/yum/\nenabled=1\ngpgcheck=1\ngpgkey=https://repo.charm.sh/yum/gpg.key\n' | $SUDO tee /etc/yum.repos.d/charm.repo >/dev/null
+      $SUDO $PKG install -y crush
+      ;;
+    *)
+      echo "[deploy] ERROR: unsupported Linux distribution '${ID:-unknown}'" >&2
+      echo "[deploy] supported: Rocky/RHEL/Fedora/CentOS/AlmaLinux and Ubuntu/Debian" >&2
+      exit 1
+      ;;
+  esac
+fi
+hash -r 2>/dev/null || true
+CRUSH_BIN="$(command -v crush 2>/dev/null || true)"
+if [ -z "$CRUSH_BIN" ] || [ ! -x "$CRUSH_BIN" ]; then
+  echo "[deploy] ERROR: Crush binary not found after package installation" >&2
+  exit 1
+fi
+echo "[deploy] Crush ready: $CRUSH_BIN"
+"$CRUSH_BIN" --version 2>/dev/null || true
+echo "[deploy] Open Crush from Agents (enter/o)."
 `
 
 // agentCatalog is the set of agents offered in the Agents section.

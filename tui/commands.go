@@ -13,7 +13,7 @@ import (
 )
 
 // DefaultModel mirrors the Python helper's default Ollama model.
-const DefaultModel = "rnj-1"
+const DefaultModel = "nemotron-3-super:cloud"
 
 func connectCmd(gateway string) tea.Cmd {
 	return func() tea.Msg {
@@ -396,9 +396,10 @@ type tuiSettings struct {
 	AgentHosts    map[string][]string `json:"agent_hosts"` // agent name -> every host it was deployed on
 	Hermes        hermesSettings      `json:"hermes"`
 	Buzz          buzzSettings        `json:"buzz"`
-	CustomDeploys []customDeploy      `json:"custom_deploys"` // user-defined deployment types
-	CustomSeeded  bool                `json:"custom_seeded"`  // built-in custom deploys seeded once (so deletes stick)
-	VMImages      map[string]string   `json:"vm_images"`      // VM name -> source image name
+	CustomDeploys []customDeploy      `json:"custom_deploys"`     // user-defined deployment types
+	CustomSeeded  bool                `json:"custom_seeded"`      // built-in custom deploys seeded once (so deletes stick)
+	Services      []serviceLink       `json:"services,omitempty"` // successfully deployed custom services
+	VMImages      map[string]string   `json:"vm_images"`          // VM name -> source image name
 }
 
 // buzzSettings persists the operator key and default channel id for the Buzz
@@ -408,10 +409,8 @@ type buzzSettings struct {
 	ChannelID   string `json:"channel_id"`
 }
 
-// customDeploy is a user-defined Nutanix deployment type: a friendly name plus
-// the URL of a setup script run on the new VM (curl | sudo bash) after the image
-// boots. Deploying one provisions a VM from the configured image, then runs the
-// script.
+// customDeploy is a user-defined workload: a friendly name plus a setup URL or
+// command that can run on a newly provisioned VM or an existing Ollama worker.
 type customDeploy struct {
 	Name      string `json:"name"`
 	ScriptURL string `json:"script_url"`
@@ -420,6 +419,14 @@ type customDeploy struct {
 	Scheme string `json:"scheme,omitempty"`
 	Port   string `json:"port,omitempty"`
 	Path   string `json:"path,omitempty"`
+}
+
+// serviceLink is a successfully deployed custom service. Gateway and Ollama
+// worker URLs are derived live and are not duplicated in persisted settings.
+type serviceLink struct {
+	Name   string `json:"name"`
+	Target string `json:"target"`
+	URL    string `json:"url"`
 }
 
 // hermesSettings holds the one-time inputs that let Hermes deploys set up the
@@ -611,6 +618,14 @@ func saveCustomDeploys(path string, cds []customDeploy) error {
 	s := loadSettings(path)
 	s.CustomDeploys = cds
 	s.CustomSeeded = true
+	return saveSettings(path, s)
+}
+
+// saveServices persists custom service links after their setup command exits
+// successfully. Entries are upserted by service name and deployment target.
+func saveServices(path string, services []serviceLink) error {
+	s := loadSettings(path)
+	s.Services = services
 	return saveSettings(path, s)
 }
 

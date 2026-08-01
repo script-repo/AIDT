@@ -62,7 +62,11 @@ func (m model) viewSidebar() string {
 	b.WriteString(navTitle.Render("≡  MENU"))
 	b.WriteString("\n\n")
 	for i, s := range sections {
-		label := fmt.Sprintf("%d  %s", i+1, s.name)
+		shortcut := fmt.Sprintf("%d", i+1)
+		if i == 9 {
+			shortcut = "0"
+		}
+		label := shortcut + "  " + s.name
 		switch {
 		case section(i) == m.section && m.zone == zoneSidebar:
 			b.WriteString(navItemActive.Width(18).Render("▌ " + label))
@@ -119,6 +123,8 @@ func (m model) sectionBody() string {
 		return m.viewLoad()
 	case secNutanix:
 		return m.viewNutanix()
+	case secServices:
+		return m.viewServices()
 	case secAccess:
 		return m.viewAccess()
 	case secUpdate:
@@ -379,12 +385,12 @@ func (m model) viewLoad() string {
 // ---- section: nutanix ------------------------------------------------------
 
 func (m model) viewCustomDeploys() string {
-	busy := dimStyle.Render("enter deploy/add · x delete · b open link · esc back")
+	busy := dimStyle.Render("enter new VM/add · w existing worker · x delete · b last link · esc back")
 	if m.procBusy {
 		busy = m.spin.View() + " " + warnStyle.Render("running deploy…")
 	}
 	rows := []string{
-		labelStyle.Render("Custom deployments") + dimStyle.Render("  (provision the configured image, then run a setup script)"),
+		labelStyle.Render("Custom deployments") + dimStyle.Render("  (new VM or an existing Ollama worker)"),
 		m.customList.View(),
 	}
 	if m.lastCustomAccess != "" {
@@ -396,6 +402,24 @@ func (m model) viewCustomDeploys() string {
 		labelStyle.Render("Output")+"  "+busy,
 		m.logVP.View(),
 	)
+	return lipgloss.JoinVertical(lipgloss.Left, rows...)
+}
+
+// ---- section: services -----------------------------------------------------
+
+func (m model) viewServices() string {
+	rows := []string{
+		labelStyle.Render("Exposed services") + dimStyle.Render("  (gateway, workers, and successful custom deployments)"),
+		m.servicesList.View(),
+	}
+	if selected, ok := m.selectedService(); ok {
+		rows = append(rows,
+			labelStyle.Render("Direct URL")+"  "+goodStyle.Render(osc8(selected.url, selected.url)),
+			dimStyle.Render("enter/b opens the selected URL · / filter · r refresh"),
+		)
+	} else {
+		rows = append(rows, dimStyle.Render("No exposed services known yet. Connect to a gateway or deploy a custom service."))
+	}
 	return lipgloss.JoinVertical(lipgloss.Left, rows...)
 }
 
@@ -450,7 +474,7 @@ func (m model) viewAccess() string {
 	}
 	mdl := orDefault(m.defaultModel(), "(no models discovered yet)")
 	token := orDefault(m.token, "(none — press t to create)")
-	exModel := orDefault(m.defaultModel(), "rnj-1:latest")
+	exModel := orDefault(m.defaultModel(), DefaultModel)
 	exKey := orDefault(m.token, "olla")
 	curl := fmt.Sprintf("curl %s/chat/completions \\\n  -H 'Authorization: Bearer %s' \\\n  -H 'Content-Type: application/json' \\\n  -d '{\"model\":\"%s\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}'",
 		base, exKey, exModel)
@@ -480,6 +504,7 @@ func (m model) viewModal() string {
 		modalOllaKey:      "Update Ollama cloud keys",
 		modalUpdateAll:    "Update everything",
 		modalCustomDeploy: "Add custom deployment",
+		modalCustomWorker: "Choose existing worker",
 		modalAgentRemove:  "Remove agent",
 	}
 	inner := modalTitle.Render(titles[m.modal]) + "\n\n" + m.form.View()
@@ -519,12 +544,14 @@ func (m model) shortHelp() []key.Binding {
 		mid = []key.Binding{m.km.AgentOpen, m.km.AgentDeploy, m.km.Remove, m.km.EditCfg, m.km.Filter, m.km.Back}
 	case secNutanix:
 		if m.nutanixCustom {
-			mid = []key.Binding{m.km.Open, m.km.Delete, m.km.Back}
+			mid = []key.Binding{m.km.Open, m.km.CustomWorker, m.km.Delete, m.km.OpenLink, m.km.Back}
 		} else {
 			mid = []key.Binding{m.km.Deploy, m.km.Worker, m.km.Custom, m.km.OllaLocal, m.km.EditCfg, m.km.Delete, m.km.Console, m.km.NextName, m.km.Back}
 		}
 	case secAccess:
 		mid = []key.Binding{m.km.Token, m.km.ClearToken, m.km.Back}
+	case secServices:
+		mid = []key.Binding{m.km.ServiceOpen, m.km.Filter, m.km.Refresh, m.km.Back}
 	case secUpdate:
 		mid = []key.Binding{m.km.Open, m.km.Back}
 	default:
@@ -537,10 +564,10 @@ func (m model) fullHelp() [][]key.Binding {
 	nav := []key.Binding{m.km.Up, m.km.Down, m.km.Open, m.km.Back, m.km.Filter}
 	actions := []key.Binding{
 		m.km.Connect, m.km.Disconnect, m.km.Refresh, m.km.Add, m.km.Remove,
-		m.km.Pull, m.km.Browse, m.km.SetDef, m.km.SetModel,
+		m.km.Pull, m.km.Browse, m.km.OpenLink, m.km.SetDef, m.km.SetModel, m.km.ServiceOpen,
 	}
 	access := []key.Binding{m.km.Console, m.km.ConsoleGW, m.km.AgentOpen, m.km.AgentDeploy, m.km.Token, m.km.ClearToken}
-	nutanix := []key.Binding{m.km.Deploy, m.km.Worker, m.km.OllaLocal, m.km.EditCfg, m.km.Delete, m.km.NextName}
+	nutanix := []key.Binding{m.km.Deploy, m.km.Worker, m.km.CustomWorker, m.km.OllaLocal, m.km.EditCfg, m.km.Delete, m.km.NextName}
 	global := []key.Binding{m.km.Send, m.km.NewSession, m.km.Help, m.km.Quit}
 	return [][]key.Binding{nav, actions, access, nutanix, global}
 }

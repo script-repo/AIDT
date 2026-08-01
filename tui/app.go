@@ -31,6 +31,7 @@ const (
 	secAgents
 	secLoad
 	secNutanix
+	secServices
 	secAccess
 	secUpdate
 )
@@ -48,6 +49,7 @@ var sections = []sectionInfo{
 	{"Agents", "CLI agents via ssh"},
 	{"Load", "load balancing"},
 	{"Nutanix", "VMs & deploy"},
+	{"Services", "direct service URLs"},
 	{"Access", "base URL & token"},
 	{"Update", "maintenance & upgrades"},
 }
@@ -77,6 +79,7 @@ const (
 	modalOllaKey
 	modalUpdateAll
 	modalCustomDeploy
+	modalCustomWorker
 	modalAgentRemove
 )
 
@@ -145,20 +148,22 @@ type model struct {
 	glam *glamour.TermRenderer
 	prog progress.Model
 
-	modelsList list.Model
-	poolList   list.Model
-	vmsList    list.Model
-	agentsList list.Model
-	updateList list.Model
-	customList list.Model // user-defined custom deployment types (Nutanix submenu)
+	modelsList   list.Model
+	poolList     list.Model
+	vmsList      list.Model
+	agentsList   list.Model
+	servicesList list.Model
+	updateList   list.Model
+	customList   list.Model // user-defined custom deployment types (Nutanix submenu)
 
 	// custom deployment types (Nutanix submenu)
 	customDeploys []customDeploy
+	services      []serviceLink
 	nutanixCustom bool // Nutanix section is showing the custom-deploy submenu
 
-	// custom-deploy access link: pendingCustom is the config of an in-flight
-	// custom deploy; once its VM IP is reported we record lastCustomAccess.
-	pendingCustom    *customDeploy
+	// custom-deploy access link: pendingCustom tracks an in-flight setup. Its
+	// service URL is persisted only after the setup exits successfully.
+	pendingCustom    *customRun
 	lastCustomAccess string
 	lastCustomName   string
 
@@ -175,9 +180,9 @@ type model struct {
 	pendingAgent   string // agent awaiting host pick
 	pendingAct     string // "open" | "deploy"
 	agentInstances int    // container count for the next containerized-agent deploy
-	chatVP   viewport.Model
-	logVP    viewport.Model
-	composer textarea.Model
+	chatVP         viewport.Model
+	logVP          viewport.Model
+	composer       textarea.Model
 
 	// chat
 	chatModel       string
@@ -248,7 +253,7 @@ type model struct {
 	fVMUser  string
 	fVMPass  string
 	// agent host picker
-	fAgentHost  string
+	fAgentHost string
 	// agent remove picker
 	fRemoveTarget string // selected host target for agent removal
 	// hermes gateway / telegram settings form values
@@ -272,6 +277,7 @@ type model struct {
 	fCustScheme string
 	fCustPort   string
 	fCustPath   string
+	fCustHost   string
 
 	// hermes gateway / telegram config (persisted)
 	hermesCfg hermesSettings
@@ -334,6 +340,7 @@ func newModel(gateway, sshUser, sshPass string) model {
 		customDeploys = defaultCustomDeploys()
 		seedCustom = true
 	}
+	customDeploys, migrateCustom := migrateBuiltinCustomDeploys(customDeploys)
 	vmImages := st.VMImages
 	if vmImages == nil {
 		vmImages = map[string]string{}
@@ -374,6 +381,7 @@ func newModel(gateway, sshUser, sshPass string) model {
 		poolList:      mkList("Pool"),
 		vmsList:       mkList("VMs"),
 		agentsList:    mkList("Agents"),
+		servicesList:  mkList("Services"),
 		updateList:    mkList("Update"),
 		customList:    mkList("Custom deployments"),
 		chatVP:        viewport.New(80, 16),
@@ -389,10 +397,11 @@ func newModel(gateway, sshUser, sshPass string) model {
 		agentHosts:    st.AgentHosts,
 		hermesCfg:     st.Hermes,
 		customDeploys: customDeploys,
+		services:      st.Services,
 		vmImages:      vmImages,
 		imageByID:     map[string]string{},
 	}
-	if seedCustom {
+	if seedCustom || migrateCustom {
 		_ = saveCustomDeploys(tokFile, customDeploys)
 	}
 	if m.agentReg == nil {
@@ -431,6 +440,7 @@ func newModel(gateway, sshUser, sshPass string) model {
 	m.refreshAgents()
 	m.refreshUpdateList()
 	m.refreshCustomList()
+	m.refreshServices()
 	return m
 }
 

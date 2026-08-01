@@ -109,7 +109,7 @@ execution risks.
 
 AIDT uses a left sidebar and a focused content pane. Press `Enter` to focus a
 section and `Esc` to return to the sidebar. Number keys `1` through `9` jump to
-a section directly.
+the first nine sections; `0` opens Update.
 
 | Section | Purpose |
 | --- | --- |
@@ -120,6 +120,7 @@ a section directly.
 | Agents | Deploy and open the supported Crush and Hermes terminal agents. |
 | Load | Visualize per-worker request share and active connections. |
 | Nutanix | Configure Prism placement, deploy or delete VMs, and run custom deployments. |
+| Services | List gateway, worker, and custom-service URLs with direct clickable links. |
 | Access | Show client endpoint values, model selection, and example requests. |
 | Update | Update AIDT, guests, Olla, Ollama, agents, images, and Ollama cloud keys. |
 
@@ -151,7 +152,7 @@ can then manage itself and its worker pool.
 
 ```bash
 python scripts/nutanix_olla_vm.py pattern-a \
-  --vm-name olla-gateway-01 \
+  --vm-name aidt-gateway-01 \
   --image-name "$AIDT_IMAGE_NAME" \
   --cluster-name "$AIDT_CLUSTER_NAME" \
   --subnet-name "$AIDT_SUBNET_NAME"
@@ -164,8 +165,8 @@ registers the worker with Olla.
 
 ```bash
 python scripts/nutanix_olla_vm.py pattern-b \
-  --vm-name ollama-worker-01 \
-  --model rnj-1 \
+  --vm-name aidt-worker-01 \
+  --model nemotron-3-super:cloud \
   --olla-url http://gateway-host:40114
 ```
 
@@ -175,9 +176,20 @@ gateway configuration update.
 
 ### Custom Deployment
 
-Custom deployment definitions provision a VM and then run an operator-provided
-URL or shell command. They are intentionally arbitrary remote execution and
-should only use trusted, reviewed sources.
+Custom deployment definitions run an operator-provided URL or shell command.
+Open Nutanix, press `c`, and select a definition:
+
+- Press `Enter` to provision a new VM and install the workload there.
+- Press `w` to choose an existing registered Ollama worker and install the
+  workload alongside Ollama using managed SSH access.
+
+NP4M and NRCC are built in and advertise their default HTTPS service on port
+`8443`. When several custom services share a worker, AIDT assigns ports in
+sequence (`8443`, `8444`, `8445`, and so on through `8543`). Redeploying the
+same service reuses its registered port. NP4M and NRCC receive the assigned port
+through their supported installer environment variables. Custom definitions are
+intentionally arbitrary remote execution and should only use trusted, reviewed
+sources; generic installers can read `PORT` or `AIDT_SERVICE_PORT`.
 
 ```bash
 python scripts/nutanix_olla_vm.py pattern-custom \
@@ -187,6 +199,11 @@ python scripts/nutanix_olla_vm.py pattern-custom \
   --cluster-name "$AIDT_CLUSTER_NAME" \
   --subnet-name "$AIDT_SUBNET_NAME"
 ```
+
+After a custom setup command completes successfully, its service URL is saved
+in `~/.ai-deployment-toolkit/tui.json` and appears in Services. Failed installs
+do not register a URL. Gateway and Ollama worker URLs are derived live rather
+than persisted.
 
 ### Local Olla Installation
 

@@ -12,7 +12,8 @@ Two workflows, mirroring the operator patterns:
 
   pattern-b:
     1-2. same VM provisioning as pattern-a
-    3. SSH in and install Ollama natively, then 'ollama pull <model>' (default rnj-1)
+    3. SSH in and install Ollama natively, then 'ollama pull <model>'
+       (default nemotron-3-super:cloud)
     4. register the new worker with an existing Olla instance (defaults to the
        Olla VM created by pattern-a) by rewriting its endpoint list and restarting
 
@@ -71,7 +72,7 @@ DEFAULT_VM_USER = "rocky"
 # No password is baked in; it must be supplied per run via --vm-password or the
 # AIDT_VM_PASSWORD environment variable.
 DEFAULT_VM_PASSWORD = os.environ.get("AIDT_VM_PASSWORD", "")
-DEFAULT_MODEL = "rnj-1"
+DEFAULT_MODEL = "nemotron-3-super:cloud"
 OLLA_PORT = 40114
 OLLAMA_PORT = 11434
 
@@ -640,8 +641,8 @@ def upsert_endpoint(endpoints: list[dict], endpoint: dict) -> list[dict]:
     return [e for e in endpoints if e.get("name") != endpoint["name"]] + [endpoint]
 
 
-WORKER_PREFIX = "ollama-worker-"
-GATEWAY_PREFIX = "olla-gateway-"
+WORKER_PREFIX = "aidt-worker-"
+GATEWAY_PREFIX = "aidt-gateway-"
 CUSTOM_PREFIX = "custom-"
 
 
@@ -650,8 +651,8 @@ def next_indexed_name(pc: PrismClient, prefix: str, width: int = 2) -> str:
 
     Scans existing VM names for ones matching '<prefix><digits>' and returns the
     prefix with (max index + 1), zero-padded to `width`. If none exist, restarts
-    at 01. Example: with workers 01 and 03 present -> 'ollama-worker-04'; with
-    none present -> 'ollama-worker-01'.
+    at 01. Example: with workers 01 and 03 present -> 'aidt-worker-04'; with
+    none present -> 'aidt-worker-01'.
     """
     pattern = re.compile(rf"^{re.escape(prefix)}(\d+)$")
     highest = 0
@@ -1146,7 +1147,8 @@ def main() -> int:
 
     pb = sub.add_parser("pattern-b", help="Provision a Rocky VM, install Ollama + model, register with Olla")
     add_common_args(pb)
-    pb.add_argument("--model", default=DEFAULT_MODEL, help="Ollama model to pull (default: rnj-1)")
+    pb.add_argument("--model", default=DEFAULT_MODEL,
+                    help=f"Ollama model to pull (default: {DEFAULT_MODEL})")
     pb.add_argument("--olla-url", default=None,
                     help="Existing Olla base URL to register with (default: pattern-a VM from state)")
     pb.add_argument("--olla-ssh-host", default=None,
@@ -1176,13 +1178,13 @@ def main() -> int:
     # already-running VM (e.g. one created out-of-band via the Nutanix MCP).
     ia = sub.add_parser("install-a", help="Install Olla on an existing VM (no provisioning)")
     ia.add_argument("--host", required=True, help="IP/hostname of the target VM")
-    ia.add_argument("--vm-name", default="olla-gateway-01")
+    ia.add_argument("--vm-name", default="aidt-gateway-01")
     ia.add_argument("--vm-user", default=DEFAULT_VM_USER)
     ia.add_argument("--vm-password", default=DEFAULT_VM_PASSWORD)
 
     ib = sub.add_parser("install-b", help="Install Ollama + model on an existing VM and register with Olla")
     ib.add_argument("--host", required=True, help="IP/hostname of the target VM")
-    ib.add_argument("--vm-name", default="ollama-worker-01")
+    ib.add_argument("--vm-name", default="aidt-worker-01")
     ib.add_argument("--vm-user", default=DEFAULT_VM_USER)
     ib.add_argument("--vm-password", default=DEFAULT_VM_PASSWORD)
     ib.add_argument("--model", default=DEFAULT_MODEL)
@@ -1201,7 +1203,7 @@ def main() -> int:
     nn = sub.add_parser("next-name", help="Print the next available indexed VM name for a role")
     add_common_args(nn)
     nn.add_argument("--role", choices=["worker", "gateway"], default="worker")
-    nn.add_argument("--prefix", default=None, help="Override the name prefix (e.g. ollama-worker-)")
+    nn.add_argument("--prefix", default=None, help="Override the name prefix (e.g. aidt-worker-)")
 
     re_ = sub.add_parser("register-endpoints",
                          help="Register one or more worker endpoints with Olla in a single batch")
