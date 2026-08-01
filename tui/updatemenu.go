@@ -150,17 +150,38 @@ func (m *model) startUpdatePlan(steps []updateStep, label string) tea.Cmd {
 // a more reliable -File path when possible.
 func localInstallerScript() string {
 	if runtime.GOOS == "windows" {
-		// Download then -File: clearer errors than irm|iex under -Command, and
-		// avoids some ExecutionPolicy / pipeline quirks inside the TUI child.
-		url := installerBaseURL + "/install.ps1"
-		return "$ProgressPreference='SilentlyContinue'; " +
-			"$p=Join-Path $env:TEMP ('aidt-install-'+[guid]::NewGuid().ToString('n')+'.ps1'); " +
-			"Invoke-WebRequest -UseBasicParsing -Uri '" + url + "' -OutFile $p; " +
-			"try { & powershell -NoProfile -ExecutionPolicy Bypass -File $p; $c=$LASTEXITCODE } " +
-			"finally { Remove-Item -Force $p -ErrorAction SilentlyContinue }; " +
-			"if ($null -eq $c) { $c=0 }; exit $c"
+		return windowsLocalInstallerScript()
 	}
 	return "curl -fsSL " + installerBaseURL + "/install.sh | sh"
+}
+
+func windowsLocalInstallerScript() string {
+	url := installerBaseURL + "/install.ps1"
+	return fmt.Sprintf(`$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+$p = Join-Path $env:TEMP ('aidt-install-' + [guid]::NewGuid().ToString('n') + '.ps1')
+$c = 1
+try {
+  try {
+    Invoke-WebRequest -UseBasicParsing -ErrorAction Stop -Uri '%s' -OutFile $p
+  } catch {
+    $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+    if ($null -eq $curl) { throw }
+    & $curl.Source --fail --silent --show-error --location --output $p '%s'
+    if ($LASTEXITCODE -ne 0) { throw "curl.exe download failed with exit code $LASTEXITCODE" }
+  }
+  if (-not (Test-Path -LiteralPath $p) -or (Get-Item -LiteralPath $p).Length -eq 0) { throw 'installer download did not create a usable file' }
+  & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $p
+  $c = $LASTEXITCODE
+  if ($null -eq $c) { $c = 0 }
+} catch {
+  Write-Error "AIDT update failed: $($_.Exception.Message)"
+  $c = 1
+} finally {
+  Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
+}
+exit $c`, url, url)
 }
 
 // updateGatewayPlan reinstalls the latest Olla on the connected gateway.

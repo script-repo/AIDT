@@ -15,6 +15,8 @@
     $env:AIDT_INSTALL_DIR = 'C:\tools\aidt'
 #>
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
 $Repo    = 'script-repo/AIDT'
 $BinName = 'aidt'
@@ -22,6 +24,27 @@ $InstallDir = if ($env:AIDT_INSTALL_DIR) { $env:AIDT_INSTALL_DIR } else { Join-P
 
 function Info($m) { Write-Host "[install] $m" }
 function Fail($m) { Write-Error "[install] ERROR: $m"; exit 1 }
+function Download-File($Uri, $OutFile) {
+  try {
+    Invoke-WebRequest -UseBasicParsing -ErrorAction Stop `
+      -Headers @{ 'User-Agent' = 'aidt-install' } -Uri $Uri -OutFile $OutFile
+  } catch {
+    $webError = $_
+    $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+    if ($null -eq $curl) {
+      throw "PowerShell download failed and curl.exe is unavailable: $webError"
+    }
+    Info 'PowerShell download failed; retrying with curl.exe'
+    & $curl.Source --fail --silent --show-error --location `
+      --user-agent 'aidt-install' --output $OutFile $Uri
+    if ($LASTEXITCODE -ne 0) {
+      throw "curl.exe download failed with exit code $LASTEXITCODE (PowerShell error: $webError)"
+    }
+  }
+  if (-not (Test-Path -LiteralPath $OutFile) -or (Get-Item -LiteralPath $OutFile).Length -eq 0) {
+    throw "download did not create a usable file at $OutFile"
+  }
+}
 
 # Map architecture -> GoReleaser arch.
 $archRaw = $env:PROCESSOR_ARCHITECTURE
@@ -35,12 +58,15 @@ switch ($archRaw) {
 $Version = $env:AIDT_VERSION
 if (-not $Version) {
   Info 'resolving latest release'
+  $releaseJson = Join-Path ([System.IO.Path]::GetTempPath()) ("aidt-release-" + [System.Guid]::NewGuid().ToString('N') + '.json')
   try {
-    $rel = Invoke-RestMethod -Headers @{ 'User-Agent' = 'aidt-install' } `
-      -Uri "https://api.github.com/repos/$Repo/releases/latest"
+    Download-File "https://api.github.com/repos/$Repo/releases/latest" $releaseJson
+    $rel = Get-Content -LiteralPath $releaseJson -Raw | ConvertFrom-Json
     $Version = $rel.tag_name
   } catch {
     Fail "could not determine latest release; set `$env:AIDT_VERSION ($_)"
+  } finally {
+    Remove-Item -LiteralPath $releaseJson -Force -ErrorAction SilentlyContinue
   }
 }
 $VerNoV = $Version.TrimStart('v')
@@ -54,7 +80,7 @@ try {
   $zip = Join-Path $tmp $Asset
   $stage = Join-Path $tmp 'stage'
   Info "downloading $Asset ($Version)"
-  Invoke-WebRequest -Headers @{ 'User-Agent' = 'aidt-install' } -Uri $Url -OutFile $zip
+  Download-File $Url $zip
 
   Info "extracting to staging area"
   New-Item -ItemType Directory -Path $stage -Force | Out-Null
