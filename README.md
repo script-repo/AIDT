@@ -231,13 +231,34 @@ Overrides, set on the deployment definition or in the guest environment:
 | `AIDT_METALLB_RANGE` | Skip discovery, e.g. `10.0.0.90-10.0.0.94`. |
 | `AIDT_METALLB_START` | Preferred first octet of the window (default `81`). |
 | `AIDT_METALLB_FORCE=1` | Re-enable MetalLB even if it is already on. |
+| `AIDT_MICROK8S_STORAGE` | `none` skips the storage addon (default: `hostpath`). |
 | `MICROK8S_CHANNEL` | Snap channel (default `stable`). |
+
+#### Storage
+
+`hostpath-storage` is enabled so PersistentVolumeClaims work out of the box,
+backed by the node's own disk. Without a default StorageClass every PVC stays
+`Pending` and Helm charts that request persistence hang with nothing pointing at
+the cause.
+
+The class is `microk8s-hostpath`, marked default, with
+`volumeBindingMode: WaitForFirstConsumer` — so a claim on its own stays `Pending`
+until a pod mounts it. That is expected, not a fault. The installer proves the
+whole path by binding a real claim through a throwaway pod (using an image
+already on the node, so a registry problem cannot fail an otherwise healthy
+deploy) and deletes it again.
+
+Volumes live under `/var/snap/microk8s/common/default-storage`, and the
+installer reports the free space there. Being node-local, the data does not
+survive the node and does not follow a workload to a second node — fine for a
+lab cluster, not for production. Set `AIDT_MICROK8S_STORAGE=none` to skip the
+addon if you intend to attach your own CSI driver instead.
 
 The installer writes a kubeconfig to the deploy user's `~/.kube/config`, adds
 that user to the `microk8s` group, installs a standalone `kubectl` alongside the
 `microk8s kubectl` alias, and enables `dns` and `helm3`. It reports the cluster
 into Services as `https://<node-ip>:16443` with the MetalLB pool shown alongside
-it. No storage addon is enabled.
+it.
 
 #### Bastion access
 

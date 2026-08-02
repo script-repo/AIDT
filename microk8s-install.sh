@@ -194,6 +194,93 @@ else
 	$SUDO microk8s enable "metallb:${POOL}"
 fi
 
+# --- storage ------------------------------------------------------------------
+# Without a default StorageClass every PersistentVolumeClaim stays Pending, and
+# a Helm chart that asks for persistence just hangs with nothing pointing at the
+# cause. hostpath-storage backs volumes with the node's own disk, so a claim can
+# use whatever space the system has.
+STORAGE_MODE="${AIDT_MICROK8S_STORAGE:-hostpath}"
+STORAGE_DIR="/var/snap/microk8s/common/default-storage"
+STORAGE_CLASS=""
+
+if [ "$STORAGE_MODE" = "none" ]; then
+	log "storage addon skipped (AIDT_MICROK8S_STORAGE=none) — PersistentVolumeClaims will stay Pending"
+else
+	if $SUDO microk8s status --format short 2>/dev/null | grep -q 'hostpath-storage: enabled'; then
+		log "hostpath-storage already enabled"
+	else
+		log "enabling hostpath-storage for PersistentVolumeClaims…"
+		$SUDO microk8s enable hostpath-storage >/dev/null
+	fi
+
+	log "waiting for a default StorageClass…"
+	for _ in $(seq 1 60); do
+		STORAGE_CLASS="$($SUDO microk8s kubectl get storageclass 2>/dev/null | awk '/\(default\)/{print $1; exit}')"
+		[ -n "$STORAGE_CLASS" ] && break
+		sleep 2
+	done
+	[ -n "$STORAGE_CLASS" ] ||
+		die "no default StorageClass appeared; PersistentVolumeClaims would stay Pending (check: microk8s status)"
+	log "default StorageClass: $STORAGE_CLASS"
+
+	# The class binds WaitForFirstConsumer, so a claim on its own stays Pending
+	# by design — only a pod that mounts it proves provisioning really works.
+	# Use an image the node already has, so a registry problem cannot fail an
+	# otherwise healthy deployment.
+	PAUSE_IMG="$($SUDO microk8s ctr images ls -q 2>/dev/null | grep -m1 '^registry.k8s.io/pause:' || true)"
+	if [ -z "$PAUSE_IMG" ]; then
+		log "NOTE: no local pause image, skipping the bind check; the StorageClass is in place"
+	else
+		log "verifying a PersistentVolumeClaim can bind…"
+		$SUDO microk8s kubectl apply -f - >/dev/null 2>&1 <<PVCEOF || true
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: aidt-storage-probe
+  namespace: default
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 64Mi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: aidt-storage-probe
+  namespace: default
+spec:
+  restartPolicy: Never
+  containers:
+  - name: probe
+    image: $PAUSE_IMG
+    volumeMounts:
+    - name: probe
+      mountPath: /data
+  volumes:
+  - name: probe
+    persistentVolumeClaim:
+      claimName: aidt-storage-probe
+PVCEOF
+		PVC_PHASE=""
+		for _ in $(seq 1 45); do
+			PVC_PHASE="$($SUDO microk8s kubectl get pvc aidt-storage-probe -n default -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+			[ "$PVC_PHASE" = "Bound" ] && break
+			sleep 2
+		done
+		# Always clean up, whatever the outcome.
+		$SUDO microk8s kubectl delete pod/aidt-storage-probe pvc/aidt-storage-probe \
+			-n default --wait=false >/dev/null 2>&1 || true
+		if [ "$PVC_PHASE" = "Bound" ]; then
+			log "PersistentVolumeClaims bind correctly"
+		else
+			log "WARNING: a test claim did not bind (phase '${PVC_PHASE:-unknown}')."
+			log "         Storage is configured but PVCs may not work; check:"
+			log "           microk8s kubectl -n kube-system logs -l k8s-app=hostpath-provisioner"
+		fi
+	fi
+fi
+
 # --- Helm ---------------------------------------------------------------------
 if command -v helm >/dev/null 2>&1; then
 	log "helm already installed: $(command -v helm)"
@@ -229,12 +316,18 @@ echo
 
 # Machine-readable record. AIDT parses this line to register the cluster in its
 # Services menu with the API endpoint and the MetalLB pool it actually got.
-printf 'AIDT_SERVICE_INFO {"url":"https://%s:16443","detail":"cluster %s · MetalLB pool %s"}\n' \
-	"$NODE_IP" "$NODE_IP" "$POOL"
+printf 'AIDT_SERVICE_INFO {"url":"https://%s:16443","detail":"cluster %s · MetalLB pool %s · storage %s"}\n' \
+	"$NODE_IP" "$NODE_IP" "$POOL" "${STORAGE_CLASS:-none}"
 
 log "=========================================="
 log " MicroK8s ready on $(hostname) (${NODE_IP})"
 log " MetalLB pool : ${POOL}"
+if [ -n "$STORAGE_CLASS" ]; then
+	log " StorageClass : ${STORAGE_CLASS} (default)"
+	log " Volume store : ${STORAGE_DIR} — $($SUDO df -h "$STORAGE_DIR" 2>/dev/null | awk 'NR==2{print $4" free of "$2}')"
+else
+	log " StorageClass : none — PersistentVolumeClaims will stay Pending"
+fi
 log " Helm         : $(helm version --short 2>/dev/null || echo 'installed (re-login for group access)')"
 log " kubeconfig   : ${KUBECONFIG_PATH}"
 log "=========================================="

@@ -186,3 +186,40 @@ func TestSeedBuiltinsReachExistingInstallsButDeletesStick(t *testing.T) {
 		t.Error("seeding is not idempotent")
 	}
 }
+
+// A cluster with no default StorageClass leaves every PersistentVolumeClaim
+// Pending, and a Helm chart that asks for persistence hangs with nothing
+// pointing at the cause.
+func TestMicroK8sEnablesStorageForPVCs(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "microk8s-install.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+
+	for _, want := range []string{
+		"microk8s enable hostpath-storage",
+		"AIDT_MICROK8S_STORAGE",                 // opt out
+		"no default StorageClass appeared",      // fails loudly rather than silently
+		"kind: PersistentVolumeClaim",           // the bind is actually proven
+		"kubectl delete pod/aidt-storage-probe", // and cleaned up
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("installer missing storage element %q", want)
+		}
+	}
+
+	// The class binds WaitForFirstConsumer, so a claim alone stays Pending by
+	// design. Verifying without a consumer pod would fail on a healthy cluster.
+	if !strings.Contains(s, "kind: Pod") || !strings.Contains(s, "persistentVolumeClaim") {
+		t.Error("the bind check has no consumer pod, so it would report a false failure")
+	}
+	// A registry problem must not fail an otherwise healthy deployment.
+	if !strings.Contains(s, "registry.k8s.io/pause:") || !strings.Contains(s, "skipping the bind check") {
+		t.Error("the bind check does not fall back when no local image is available")
+	}
+	// Storage should be visible where the operator looks for it.
+	if !strings.Contains(s, `storage %s`) {
+		t.Error("the storage class is not reported into Services")
+	}
+}
