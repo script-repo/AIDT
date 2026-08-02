@@ -255,7 +255,7 @@ func repoSlug(repo string) string {
 // Helm runs as `upgrade --install` so redeploying an app that is already there
 // converges instead of failing, which is what makes the d key safe to press
 // twice. Manifests are applied rather than created for the same reason.
-func appDeployScript(a k8sApp, d appDeployment) (string, error) {
+func appDeployScript(a k8sApp, d appDeployment, secrets map[string]string) (string, error) {
 	ns, ctx := strings.TrimSpace(d.Namespace), strings.TrimSpace(d.Context)
 	if ns == "" || ctx == "" {
 		return "", errors.New("context and namespace are required")
@@ -264,6 +264,32 @@ func appDeployScript(a k8sApp, d appDeployment) (string, error) {
 
 	var b strings.Builder
 	b.WriteString(k8sToolPrefix)
+
+	// Generated secrets travel in a values file rather than on the command
+	// line. The script itself reaches the host over stdin, but a `--set` would
+	// put the secret into helm's own argv, where any other user on the box can
+	// read it out of ps — the same reason bastion.go never passes a kubeconfig
+	// as an argument.
+	valsFile := ""
+	if len(secrets) > 0 {
+		if a.kind() != appKindHelm {
+			return "", errors.New("generated secrets need a Helm chart; a manifest takes no values")
+		}
+		doc, err := valuesYAML(secrets)
+		if err != nil {
+			return "", err
+		}
+		// The document is hex and YAML only, so it cannot contain the heredoc
+		// delimiter; the quoted delimiter also stops the shell expanding it.
+		valsFile = "$AIDT_VALS"
+		b.WriteString(`
+umask 077
+AIDT_VALS=$(mktemp /tmp/aidt-values-XXXXXX.yaml)
+trap 'rm -f "$AIDT_VALS"' EXIT
+cat > "$AIDT_VALS" <<'AIDT_VALUES_EOF'
+` + doc + `AIDT_VALUES_EOF
+`)
+	}
 
 	switch a.kind() {
 	case appKindHelm:
@@ -285,6 +311,11 @@ func appDeployScript(a k8sApp, d appDeployment) (string, error) {
 		}
 		if v := strings.TrimSpace(a.Version); v != "" {
 			args = append(args, "--version", q(v))
+		}
+		// Generated values go first so an explicit entry in the app's Values can
+		// still override one.
+		if valsFile != "" {
+			args = append(args, "-f", `"`+valsFile+`"`)
 		}
 		for i, s := range a.valuesArgs() {
 			// valuesArgs alternates "--set", "k=v"; only the value needs quoting.

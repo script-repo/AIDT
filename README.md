@@ -448,6 +448,34 @@ The registry of what is installed where lives in
 `~/.ai-deployment-toolkit/tui.json` and is written only after a deploy or remove
 exits successfully, so a failed deploy never leaves an app showing as running.
 
+### Generated secrets
+
+Some charts require a secret that has no sensible default. An application can
+declare which values AIDT must fill with generated randomness, and one is
+generated per installation on first deploy.
+
+They are generated rather than shipped because a value hardcoded in the catalog
+would be identical on every AIDT install, and they are kept rather than rotated
+because handing an already-initialised database a fresh password locks the app
+out of its own data. The values live in `~/.ai-deployment-toolkit/tui.json`
+(mode 0600, alongside the SSH and Prism credentials) and are dropped when the
+installation is removed.
+
+They reach Helm through a `umask 077` values file rather than `--set`: the
+deploy script itself travels over stdin, but a `--set` would put the secret into
+helm's own argv, where any other user on the gateway could read it out of `ps`.
+
+Paperclip is the built-in that needs this. Its chart's values promise to
+auto-generate a PostgreSQL password and a BetterAuth key when left empty, but it
+writes empty strings — PostgreSQL then exits with *"Database is uninitialized
+and superuser password is not specified"* and the app's `wait-for-postgres` init
+container blocks behind it forever.
+
+> **Paperclip after deploy:** the app enforces a hostname allowlist and answers
+> `403` on an address it has not been told about. Set `publicURL` in its Values
+> to the URL shown in App Services — for example
+> `publicURL=http://10.0.0.5:31586` — and redeploy.
+
 Built-in applications are seeded on first launch and topped up when a later AIDT
 release adds one, using the same ledger as the custom deployments — so deleting
 one sticks. Bitnami charts are deliberately absent: the public Bitnami image

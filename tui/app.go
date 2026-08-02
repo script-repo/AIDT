@@ -208,6 +208,10 @@ type model struct {
 	appSvcErr     string
 	appSvcLoading bool
 
+	// appSecrets holds generated chart values per installation, keyed by
+	// appDeployment.secretKey().
+	appSecrets map[string]map[string]string
+
 	// custom-deploy access link: pendingCustom tracks an in-flight setup. Its
 	// service URL is persisted only after the setup exits successfully.
 	pendingCustom    *customRun
@@ -488,6 +492,7 @@ func newModel(gateway, sshUser, sshPass string) model {
 		apps:          apps,
 		appsSeeded:    appsSeeded,
 		appDeploys:    st.AppDeploys,
+		appSecrets:    st.AppSecrets,
 	}
 	if seedCustom || migrateCustom || addedBuiltin {
 		_ = saveCustomDeploys(tokFile, customDeploys, seededBuiltins)

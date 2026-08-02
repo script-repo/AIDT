@@ -4,6 +4,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // testAppModel builds a fully initialised model whose persistence is redirected
@@ -184,7 +186,7 @@ func TestDeleteAppKeepsDeployments(t *testing.T) {
 func TestAppDeployScriptHelm(t *testing.T) {
 	a := k8sApp{Name: "Web", Repo: "https://charts.example.com", Chart: "web", Version: "1.2.3", Values: "a=1, b=2"}
 	d := appDeployment{App: "Web", Context: "prod", Namespace: "ai", Release: "web", Kind: appKindHelm}
-	got, err := appDeployScript(a, d)
+	got, err := appDeployScript(a, d, nil)
 	if err != nil {
 		t.Fatalf("appDeployScript: %v", err)
 	}
@@ -208,7 +210,7 @@ func TestAppDeployScriptHelm(t *testing.T) {
 func TestAppDeployScriptPublishesPrimaryService(t *testing.T) {
 	a := k8sApp{Name: "Web", Repo: "https://r", Chart: "web"}
 	d := appDeployment{App: "Web", Context: "prod", Namespace: "ai", Release: "web", Kind: appKindHelm}
-	got, err := appDeployScript(a, d)
+	got, err := appDeployScript(a, d, nil)
 	if err != nil {
 		t.Fatalf("appDeployScript: %v", err)
 	}
@@ -231,7 +233,7 @@ func TestAppDeployScriptPublishesPrimaryService(t *testing.T) {
 	// A manifest install has no values at all and must still be published.
 	mo := k8sApp{Name: "Thing", ManifestURL: "https://example.com/app.yaml"}
 	md := appDeployment{App: "Thing", Context: "prod", Namespace: "ops", Release: "thing", Kind: appKindManifest}
-	mGot, err := appDeployScript(mo, md)
+	mGot, err := appDeployScript(mo, md, nil)
 	if err != nil {
 		t.Fatalf("appDeployScript(manifest): %v", err)
 	}
@@ -243,7 +245,7 @@ func TestAppDeployScriptPublishesPrimaryService(t *testing.T) {
 func TestAppDeployScriptRespectsExposeNone(t *testing.T) {
 	a := k8sApp{Name: "Op", Repo: "https://r", Chart: "op", Expose: exposeNone}
 	d := appDeployment{App: "Op", Context: "prod", Namespace: "data", Release: "op", Kind: appKindHelm}
-	got, err := appDeployScript(a, d)
+	got, err := appDeployScript(a, d, nil)
 	if err != nil {
 		t.Fatalf("appDeployScript: %v", err)
 	}
@@ -300,10 +302,182 @@ func TestExposeFragmentGuardsUnsafeServices(t *testing.T) {
 	}
 }
 
+func TestValuesYAMLNestsDottedPaths(t *testing.T) {
+	got, err := valuesYAML(map[string]string{
+		"postgresql.auth.password": "pw",
+		"auth.betterAuthSecret":    "sec",
+	})
+	if err != nil {
+		t.Fatalf("valuesYAML: %v", err)
+	}
+	var round map[string]any
+	if err := yaml.Unmarshal([]byte(got), &round); err != nil {
+		t.Fatalf("rendered values are not valid YAML: %v\n%s", err, got)
+	}
+	pg, _ := round["postgresql"].(map[string]any)
+	auth, _ := pg["auth"].(map[string]any)
+	if auth["password"] != "pw" {
+		t.Errorf("postgresql.auth.password did not nest: %s", got)
+	}
+	top, _ := round["auth"].(map[string]any)
+	if top["betterAuthSecret"] != "sec" {
+		t.Errorf("auth.betterAuthSecret did not nest: %s", got)
+	}
+
+	if s, err := valuesYAML(nil); err != nil || s != "" {
+		t.Errorf("empty input produced %q, %v", s, err)
+	}
+	// A path that is both a leaf and a parent cannot be rendered, and silently
+	// dropping one of them would deploy with a value the operator never sees.
+	if _, err := valuesYAML(map[string]string{"a": "1", "a.b": "2"}); err == nil {
+		t.Error("conflicting value paths were accepted")
+	}
+}
+
+func TestGenerateSecretIsRandomAndSized(t *testing.T) {
+	a, err := generateSecret(24)
+	if err != nil {
+		t.Fatalf("generateSecret: %v", err)
+	}
+	b, _ := generateSecret(24)
+	if a == b {
+		t.Error("two generated secrets are identical")
+	}
+	if len(a) != 48 { // hex doubles the byte count
+		t.Errorf("len = %d, want 48", len(a))
+	}
+	// BetterAuth needs at least 32 characters.
+	if s, _ := generateSecret(32); len(s) < 32 {
+		t.Errorf("32-byte secret rendered %d chars", len(s))
+	}
+	if s, _ := generateSecret(0); len(s) != defaultSecretBytes*2 {
+		t.Errorf("default length = %d", len(s))
+	}
+}
+
+func TestEnsureAppSecretsAreStableAcrossRedeploys(t *testing.T) {
+	m := testAppModel(t)
+	a := k8sApp{Name: "Paperclip", Repo: "https://r", Chart: "paperclip", Secrets: []appSecret{
+		{Path: "postgresql.auth.password", Bytes: 24},
+		{Path: "auth.betterAuthSecret", Bytes: 32},
+	}}
+	d := appDeployment{App: "Paperclip", Context: "prod", Namespace: "ai", Release: "paperclip", Kind: appKindHelm}
+
+	first, err := m.ensureAppSecrets(a, d)
+	if err != nil {
+		t.Fatalf("ensureAppSecrets: %v", err)
+	}
+	if len(first) != 2 || first["postgresql.auth.password"] == "" {
+		t.Fatalf("secrets not generated: %v", first)
+	}
+
+	// Redeploying must reuse them. Handing an already-initialised PostgreSQL a
+	// fresh password locks the app out of its own database.
+	second, err := m.ensureAppSecrets(a, d)
+	if err != nil {
+		t.Fatalf("ensureAppSecrets: %v", err)
+	}
+	for k, v := range first {
+		if second[k] != v {
+			t.Errorf("secret %q was rotated on redeploy", k)
+		}
+	}
+
+	// A different installation of the same app gets its own secrets.
+	other := d
+	other.Context = "lab"
+	third, _ := m.ensureAppSecrets(a, other)
+	if third["postgresql.auth.password"] == first["postgresql.auth.password"] {
+		t.Error("two installations share a generated password")
+	}
+
+	// They must survive a restart, which is the whole point of persisting them.
+	reloaded := loadSettings(m.tokFile)
+	if got := reloaded.AppSecrets[d.secretKey()]["postgresql.auth.password"]; got != first["postgresql.auth.password"] {
+		t.Errorf("secret did not persist: %q", got)
+	}
+
+	// The returned map is a copy; mutating it must not corrupt the store.
+	second["postgresql.auth.password"] = "tampered"
+	if m.appSecrets[d.secretKey()]["postgresql.auth.password"] == "tampered" {
+		t.Error("caller mutated the persisted secret store")
+	}
+
+	// Removing the installation clears its credentials.
+	m.forgetAppSecrets(d)
+	if _, ok := m.appSecrets[d.secretKey()]; ok {
+		t.Error("secrets outlived the installation")
+	}
+	if _, ok := m.appSecrets[other.secretKey()]; !ok {
+		t.Error("forgetting one installation dropped another's secrets")
+	}
+}
+
+func TestAppDeployScriptKeepsSecretsOutOfArgv(t *testing.T) {
+	a := k8sApp{Name: "Paperclip", Repo: "https://r", Chart: "paperclip", Secrets: []appSecret{
+		{Path: "postgresql.auth.password"},
+	}}
+	d := appDeployment{App: "Paperclip", Context: "prod", Namespace: "ai", Release: "paperclip", Kind: appKindHelm}
+	secrets := map[string]string{"postgresql.auth.password": "s3cr3tvalue"}
+
+	got, err := appDeployScript(a, d, secrets)
+	if err != nil {
+		t.Fatalf("appDeployScript: %v", err)
+	}
+	// The secret must never reach helm's argv, where any other user on the host
+	// can read it out of ps — the rule bastion.go already follows.
+	if strings.Contains(got, "--set postgresql.auth.password") ||
+		strings.Contains(got, "--set 'postgresql.auth.password=s3cr3tvalue'") {
+		t.Errorf("secret passed as a command argument:\n%s", got)
+	}
+	for _, want := range []string{"umask 077", "mktemp", "-f \"$AIDT_VALS\"", "s3cr3tvalue", "AIDT_VALUES_EOF"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("script missing %q\n%s", want, got)
+		}
+	}
+	// The temp file holds credentials and must not survive the run.
+	if !strings.Contains(got, `trap 'rm -f "$AIDT_VALS"' EXIT`) {
+		t.Errorf("values file is not cleaned up:\n%s", got)
+	}
+
+	// A manifest install takes no values, so asking for generated secrets is a
+	// configuration error rather than something to silently ignore.
+	mo := k8sApp{Name: "M", ManifestURL: "https://e/x.yaml", Secrets: []appSecret{{Path: "a.b"}}}
+	md := appDeployment{App: "M", Context: "c", Namespace: "n", Release: "r", Kind: appKindManifest}
+	if _, err := appDeployScript(mo, md, map[string]string{"a.b": "v"}); err == nil {
+		t.Error("secrets on a manifest install were accepted")
+	}
+}
+
+func TestPaperclipBuiltinDeclaresItsSecrets(t *testing.T) {
+	var pc k8sApp
+	for _, a := range builtinApps() {
+		if a.Name == "Paperclip" {
+			pc = a
+		}
+	}
+	if pc.Name == "" {
+		t.Fatal("Paperclip is not in the catalog")
+	}
+	// Without both of these the chart deploys and then fails: PostgreSQL will
+	// not initialise with an empty password, and BetterAuth needs a 32-char key.
+	want := map[string]bool{"postgresql.auth.password": false, "auth.betterAuthSecret": false}
+	for _, s := range pc.Secrets {
+		if _, ok := want[s.Path]; ok {
+			want[s.Path] = true
+		}
+	}
+	for path, found := range want {
+		if !found {
+			t.Errorf("Paperclip does not declare %s", path)
+		}
+	}
+}
+
 func TestAppDeployScriptOCISkipsRepoAdd(t *testing.T) {
 	a := k8sApp{Name: "n8n", Chart: "oci://reg.example.com/library/n8n"}
 	d := appDeployment{App: "n8n", Context: "prod", Namespace: "ops", Release: "n8n", Kind: appKindHelm}
-	got, err := appDeployScript(a, d)
+	got, err := appDeployScript(a, d, nil)
 	if err != nil {
 		t.Fatalf("appDeployScript: %v", err)
 	}
@@ -318,7 +492,7 @@ func TestAppDeployScriptOCISkipsRepoAdd(t *testing.T) {
 func TestAppDeployScriptManifest(t *testing.T) {
 	a := k8sApp{Name: "Thing", ManifestURL: "https://example.com/app.yaml"}
 	d := appDeployment{App: "Thing", Context: "prod", Namespace: "ops", Release: "thing", Kind: appKindManifest}
-	got, err := appDeployScript(a, d)
+	got, err := appDeployScript(a, d, nil)
 	if err != nil {
 		t.Fatalf("appDeployScript: %v", err)
 	}
@@ -334,14 +508,14 @@ func TestAppDeployScriptManifest(t *testing.T) {
 
 func TestAppDeployScriptRejectsIncomplete(t *testing.T) {
 	d := appDeployment{App: "X", Context: "prod", Namespace: "ai", Release: "x"}
-	if _, err := appDeployScript(k8sApp{Name: "X"}, d); err == nil {
+	if _, err := appDeployScript(k8sApp{Name: "X"}, d, nil); err == nil {
 		t.Error("an app with no chart and no manifest was accepted")
 	}
-	if _, err := appDeployScript(k8sApp{Name: "X", Chart: "c"}, appDeployment{Context: "prod"}); err == nil {
+	if _, err := appDeployScript(k8sApp{Name: "X", Chart: "c"}, appDeployment{Context: "prod"}, nil); err == nil {
 		t.Error("a deployment with no namespace was accepted")
 	}
 	// A non-OCI chart with no repository cannot be resolved.
-	if _, err := appDeployScript(k8sApp{Name: "X", Chart: "c"}, d); err == nil {
+	if _, err := appDeployScript(k8sApp{Name: "X", Chart: "c"}, d, nil); err == nil {
 		t.Error("a bare chart name with no repo was accepted")
 	}
 }

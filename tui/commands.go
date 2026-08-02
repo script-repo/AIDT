@@ -437,6 +437,13 @@ type tuiSettings struct {
 	Apps       []k8sApp        `json:"k8s_apps,omitempty"`
 	AppsSeeded []string        `json:"k8s_apps_seeded,omitempty"`
 	AppDeploys []appDeployment `json:"k8s_app_deployments,omitempty"`
+	// AppSecrets holds per-installation generated chart values, keyed by
+	// appDeployment.secretKey() and then by value path. These are credentials,
+	// and they live here for the same reason the SSH and Prism passwords above
+	// do: tui.json is written mode 0600. They are kept rather than regenerated
+	// so a redeploy does not hand a running database a password it has never
+	// seen.
+	AppSecrets map[string]map[string]string `json:"k8s_app_secrets,omitempty"`
 }
 
 // buzzSettings persists the operator key and default channel id for the Buzz
@@ -691,6 +698,13 @@ func saveApps(path string, apps []k8sApp, seeded ...[]string) error {
 func saveAppDeploys(path string, ds []appDeployment) error {
 	s := loadSettings(path)
 	s.AppDeploys = ds
+	return saveSettings(path, s)
+}
+
+// saveAppSecrets persists per-installation generated chart values.
+func saveAppSecrets(path string, secrets map[string]map[string]string) error {
+	s := loadSettings(path)
+	s.AppSecrets = secrets
 	return saveSettings(path, s)
 }
 

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"sort"
@@ -8,6 +10,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
+	"gopkg.in/yaml.v3"
 )
 
 // The App Deploy section installs workloads onto the Kubernetes clusters listed
@@ -45,6 +48,13 @@ type k8sApp struct {
 	// Namespace is the suggested default; the deploy form can override it.
 	Namespace string `json:"namespace,omitempty"`
 
+	// Secrets are chart values that must be set to a generated random string at
+	// deploy time. Charts that promise to auto-generate a password do not
+	// always deliver one — the Paperclip chart writes an empty string, and its
+	// PostgreSQL then refuses to initialise — and a value hardcoded in this
+	// catalogue would be identical on every AIDT install.
+	Secrets []appSecret `json:"secrets,omitempty"`
+
 	// Expose controls whether the primary Service is published on a NodePort
 	// after deploying, so the app is reachable from App Services. Empty means
 	// the default (publish); "none" opts out.
@@ -54,11 +64,137 @@ type k8sApp struct {
 	Expose string `json:"expose,omitempty"`
 }
 
+// appSecret declares one chart value that AIDT fills with generated randomness.
+type appSecret struct {
+	// Path is a dotted Helm value path, e.g. "postgresql.auth.password".
+	Path string `json:"path"`
+	// Bytes of randomness; the rendered value is hex, so twice this many
+	// characters. Zero means the default.
+	Bytes int `json:"bytes,omitempty"`
+}
+
+const defaultSecretBytes = 24
+
 // expose modes.
 const (
 	exposeNodePort = "nodeport"
 	exposeNone     = "none"
 )
+
+// generateSecret returns a hex string with nbytes of entropy behind it.
+func generateSecret(nbytes int) (string, error) {
+	if nbytes <= 0 {
+		nbytes = defaultSecretBytes
+	}
+	b := make([]byte, nbytes)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate secret: %w", err)
+	}
+	return hex.EncodeToString(b), nil
+}
+
+// secretKey identifies one installation's generated secrets.
+func (d appDeployment) secretKey() string {
+	return strings.Join([]string{d.App, d.Context, d.Namespace, d.Release}, "\x00")
+}
+
+// ensureAppSecrets returns the generated values for one installation, creating
+// any that are missing and persisting the result.
+//
+// Existing values are reused rather than rotated. A redeploy that handed
+// PostgreSQL a fresh password would lock the app out of a database that was
+// already initialised with the old one — the failure would look like the very
+// bug this exists to fix.
+func (m *model) ensureAppSecrets(a k8sApp, d appDeployment) (map[string]string, error) {
+	if len(a.Secrets) == 0 {
+		return nil, nil
+	}
+	if m.appSecrets == nil {
+		m.appSecrets = map[string]map[string]string{}
+	}
+	key := d.secretKey()
+	vals := m.appSecrets[key]
+	if vals == nil {
+		vals = map[string]string{}
+	}
+	changed := false
+	for _, s := range a.Secrets {
+		path := strings.TrimSpace(s.Path)
+		if path == "" || vals[path] != "" {
+			continue
+		}
+		v, err := generateSecret(s.Bytes)
+		if err != nil {
+			return nil, err
+		}
+		vals[path] = v
+		changed = true
+	}
+	m.appSecrets[key] = vals
+	if changed {
+		if err := saveAppSecrets(m.tokFile, m.appSecrets); err != nil {
+			return nil, err
+		}
+	}
+	// Return a copy so a caller cannot mutate the persisted map.
+	out := make(map[string]string, len(vals))
+	for k, v := range vals {
+		out[k] = v
+	}
+	return out, nil
+}
+
+// forgetAppSecrets drops an installation's generated secrets once it is gone,
+// so an uninstalled app does not leave credentials in tui.json forever.
+func (m *model) forgetAppSecrets(d appDeployment) {
+	if m.appSecrets == nil {
+		return
+	}
+	if _, ok := m.appSecrets[d.secretKey()]; !ok {
+		return
+	}
+	delete(m.appSecrets, d.secretKey())
+	_ = saveAppSecrets(m.tokFile, m.appSecrets)
+}
+
+// valuesYAML renders dotted value paths into a Helm values document.
+func valuesYAML(vals map[string]string) (string, error) {
+	if len(vals) == 0 {
+		return "", nil
+	}
+	paths := make([]string, 0, len(vals))
+	for p := range vals {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+
+	root := map[string]any{}
+	for _, p := range paths {
+		parts := strings.Split(p, ".")
+		cur := root
+		for i, part := range parts[:len(parts)-1] {
+			next, ok := cur[part].(map[string]any)
+			if !ok {
+				if _, taken := cur[part]; taken {
+					return "", fmt.Errorf("value path %q conflicts with %q", p, strings.Join(parts[:i+1], "."))
+				}
+				next = map[string]any{}
+				cur[part] = next
+			}
+			cur = next
+		}
+		leaf := parts[len(parts)-1]
+		if _, taken := cur[leaf].(map[string]any); taken {
+			return "", fmt.Errorf("value path %q conflicts with a nested path", p)
+		}
+		cur[leaf] = vals[p]
+	}
+	out, err := yaml.Marshal(root)
+	if err != nil {
+		return "", fmt.Errorf("render values: %w", err)
+	}
+	return string(out), nil
+}
 
 // exposeMode reports how this app is published after a deploy. Publishing is
 // the default because a chart's stock ClusterIP leaves a healthy install with
@@ -190,8 +326,23 @@ func builtinApps() []k8sApp {
 			Repo: "https://langchain-ai.github.io/helm", Chart: "langgraph-cloud", Namespace: "ai",
 		},
 		{
+			// The chart's values promise to auto-generate these when left empty,
+			// but it writes empty strings instead: PostgreSQL then exits with
+			// "Database is uninitialized and superuser password is not
+			// specified", and the app's wait-for-postgres init container blocks
+			// forever behind it. AIDT supplies them per install.
+			//
+			// The chart also defaults image.repository to "paperclipai/paperclip"
+			// on Docker Hub, which was never published there — the pull fails with
+			// ImagePullBackOff. The image is on GHCR, so point at it.
 			Name: "Paperclip", Desc: "AI agent orchestration platform",
 			Repo: "https://ileonelperea.github.io/paperclip-helm", Chart: "paperclip", Namespace: "ai",
+			Values: "image.repository=ghcr.io/paperclipai/paperclip",
+			Secrets: []appSecret{
+				{Path: "postgresql.auth.password", Bytes: 24},
+				// BetterAuth requires at least 32 characters; hex doubles this.
+				{Path: "auth.betterAuthSecret", Bytes: 32},
+			},
 		},
 
 		// --- data services ---
@@ -507,7 +658,12 @@ func (m *model) startAppRun(script, title, act string, d appDeployment) tea.Cmd 
 
 // startAppDeploy builds and runs the install described by the deploy form.
 func (m *model) startAppDeploy(a k8sApp, d appDeployment) tea.Cmd {
-	script, err := appDeployScript(a, d)
+	secrets, err := m.ensureAppSecrets(a, d)
+	if err != nil {
+		m.notice = err.Error()
+		return nil
+	}
+	script, err := appDeployScript(a, d, secrets)
 	if err != nil {
 		m.notice = err.Error()
 		return nil
@@ -550,6 +706,9 @@ func (m *model) finishAppRun(code int) {
 		m.notice = fmt.Sprintf("%s deployed to %s", d.App, d.label())
 	case "remove":
 		m.forgetAppDeployment(*d)
+		// The workload is gone, so its generated credentials have nothing left
+		// to authenticate against and should not linger in tui.json.
+		m.forgetAppSecrets(*d)
 		m.notice = fmt.Sprintf("%s removed from %s", d.App, d.label())
 	}
 }
