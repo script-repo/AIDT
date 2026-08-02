@@ -38,9 +38,10 @@ type keyMap struct {
 	Token      key.Binding
 	ClearToken key.Binding
 
-	AgentOpen   key.Binding
-	AgentDeploy key.Binding
-	ServiceOpen key.Binding
+	AgentOpen     key.Binding
+	AgentDeploy   key.Binding
+	ServiceOpen   key.Binding
+	ServiceForget key.Binding
 
 	Send       key.Binding
 	NewSession key.Binding
@@ -81,9 +82,12 @@ func newKeyMap() keyMap {
 		AgentOpen:    key.NewBinding(key.WithKeys("o", "enter"), key.WithHelp("o/enter", "open agent")),
 		AgentDeploy:  key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "deploy agent")),
 		ServiceOpen:  key.NewBinding(key.WithKeys("enter", "b"), key.WithHelp("enter/b", "open URL")),
-		Send:         key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "send")),
-		NewSession:   key.NewBinding(key.WithKeys("ctrl+n"), key.WithHelp("ctrl+n", "new session")),
-		Help:         key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
-		Quit:         key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
+		// Distinct from Delete ("delete VM"): this only forgets a listing, it
+		// never touches the workload the listing points at.
+		ServiceForget: key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "remove listing")),
+		Send:          key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "send")),
+		NewSession:    key.NewBinding(key.WithKeys("ctrl+n"), key.WithHelp("ctrl+n", "new session")),
+		Help:          key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
+		Quit:          key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
 	}
 }

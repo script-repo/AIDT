@@ -642,6 +642,9 @@ func (m model) handleContentKey(msg tea.KeyMsg, k string) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "enter", "b":
 			return m, m.openSelectedService()
+		case "x", "delete":
+			m.removeSelectedService()
+			return m, nil
 		case "r":
 			m.refreshServices()
 			return m, nil

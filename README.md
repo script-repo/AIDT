@@ -120,7 +120,7 @@ the first nine sections; `0` opens Update.
 | Agents | Deploy and open Crush, OpenCode, Goose, Grok Build, Claude Code, Codex, and Hermes. |
 | Load | Visualize per-worker request share and active connections. |
 | Nutanix | Configure Prism placement, deploy or delete VMs, and run custom deployments. |
-| Services | List gateway, worker, agent-server, and custom-service URLs with direct clickable links. |
+| Services | List gateway, worker, agent-server, and custom-service URLs with direct clickable links. `x` removes a custom-service listing without touching the workload. |
 | Access | Show client endpoint values, model selection, and example requests. |
 | Update | Update AIDT, guests, Olla, Ollama, agents, images, and Ollama cloud keys. |
 

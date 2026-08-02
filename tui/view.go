@@ -551,7 +551,7 @@ func (m model) shortHelp() []key.Binding {
 	case secAccess:
 		mid = []key.Binding{m.km.Token, m.km.ClearToken, m.km.Back}
 	case secServices:
-		mid = []key.Binding{m.km.ServiceOpen, m.km.Filter, m.km.Refresh, m.km.Back}
+		mid = []key.Binding{m.km.ServiceOpen, m.km.ServiceForget, m.km.Filter, m.km.Refresh, m.km.Back}
 	case secUpdate:
 		mid = []key.Binding{m.km.Open, m.km.Back}
 	default:

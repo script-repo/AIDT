@@ -136,6 +136,57 @@ func (m *model) recordCustomService(run customRun) {
 	m.refreshServices()
 }
 
+// removeSelectedService forgets the highlighted Services row.
+//
+// Only custom services are persisted and therefore removable. Gateway, worker,
+// and agent-server rows are rendered from live state, so deleting one here
+// would achieve nothing — it would reappear on the next refresh. Rather than
+// silently ignoring the key, say where the row actually comes from.
+//
+// This removes the listing only. The workload it points at keeps running; that
+// is the difference between this and deleting its VM.
+func (m *model) removeSelectedService() {
+	it, ok := m.selectedService()
+	if !ok {
+		m.notice = "select a service first"
+		return
+	}
+	if it.kind != "custom service" {
+		switch it.kind {
+		case "Ollama worker":
+			m.notice = "workers are listed live — remove the endpoint in Pool (x) instead"
+		case "agent server":
+			m.notice = "agent servers are listed live — remove the agent in Agents (x) instead"
+		case "gateway":
+			m.notice = "the gateway is listed live — use c on the sidebar to connect elsewhere"
+		default:
+			m.notice = it.kind + " entries are derived live and cannot be removed here"
+		}
+		return
+	}
+
+	kept := make([]serviceLink, 0, len(m.services))
+	removed := false
+	for _, s := range m.services {
+		if !removed && s.Name == it.name && s.Target == it.target && s.URL == it.url {
+			removed = true
+			continue
+		}
+		kept = append(kept, s)
+	}
+	if !removed {
+		m.notice = "service listing not found"
+		return
+	}
+	m.services = kept
+	if m.lastCustomAccess == it.url {
+		m.lastCustomAccess, m.lastCustomName = "", ""
+	}
+	_ = saveServices(m.tokFile, m.services)
+	m.refreshServices()
+	m.notice = "removed listing: " + it.name + " on " + it.target + " (the workload is still running)"
+}
+
 // forgetServices drops persisted custom services that belonged to a deleted VM
 // and reports what it removed.
 //
