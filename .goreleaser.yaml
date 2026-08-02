@@ -54,6 +54,7 @@ archives:
       - scripts/install.ps1
       - scripts/remote/*
       - microk8s-install.sh
+      - command-atlas-install.sh
       - requirements.txt
       - README.md
 

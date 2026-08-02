@@ -130,29 +130,51 @@ func TestSeedBuiltinsReachExistingInstallsButDeletesStick(t *testing.T) {
 		{Name: "NP4M", ScriptURL: np4mInstall, Scheme: "https", Port: "8443"},
 		{Name: "NRCC", ScriptURL: nrccInstall, Scheme: "https", Port: "8443"},
 	}
-	out, ledger, changed := seedBuiltinCustomDeploys(existing, nil, true)
-	if !changed {
-		t.Fatal("MicroK8s should be added to an existing install")
+	// Everything newer than NP4M/NRCC should arrive, whatever that set is now.
+	var wantNew []string
+	for _, b := range builtinCustomDeploys() {
+		if b.ScriptURL != np4mInstall && b.ScriptURL != nrccInstall {
+			wantNew = append(wantNew, b.Name)
+		}
 	}
-	if len(out) != 3 || out[2].Name != "MicroK8s" {
-		t.Fatalf("expected MicroK8s appended, got %+v", out)
+	if len(wantNew) == 0 {
+		t.Skip("no built-ins beyond the original two")
 	}
 
-	// Deleting it must stick: the ledger remembers it was already offered.
-	afterDelete := out[:2]
+	out, ledger, changed := seedBuiltinCustomDeploys(existing, nil, true)
+	if !changed {
+		t.Fatal("newer built-ins should be added to an existing install")
+	}
+	if len(out) != len(existing)+len(wantNew) {
+		t.Fatalf("expected %d entries, got %+v", len(existing)+len(wantNew), out)
+	}
+	for _, name := range wantNew {
+		var seen bool
+		for _, c := range out {
+			if c.Name == name {
+				seen = true
+			}
+		}
+		if !seen {
+			t.Errorf("built-in %q was not added to an existing install", name)
+		}
+	}
+
+	// Deleting them must stick: the ledger remembers they were already offered.
+	afterDelete := out[:len(existing)]
 	out2, _, changed2 := seedBuiltinCustomDeploys(afterDelete, ledger, true)
 	if changed2 {
 		t.Error("a deleted built-in was re-added on the next launch")
 	}
-	if len(out2) != 2 {
+	if len(out2) != len(existing) {
 		t.Errorf("expected the delete to persist, got %+v", out2)
 	}
 
 	// A user who deleted the older built-ins before the ledger existed must not
-	// have them resurrected either.
-	out3, _, changed3 := seedBuiltinCustomDeploys(nil, nil, true)
-	if changed3 && len(out3) != 1 {
-		t.Errorf("legacy install should only gain MicroK8s, got %+v", out3)
+	// have those resurrected — only the genuinely new ones arrive.
+	out3, _, _ := seedBuiltinCustomDeploys(nil, nil, true)
+	if len(out3) != len(wantNew) {
+		t.Errorf("legacy install should only gain the newer built-ins, got %+v", out3)
 	}
 
 	// A brand-new install gets everything exactly once.

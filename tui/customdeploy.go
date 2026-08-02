@@ -21,6 +21,12 @@ const (
 	// that file, so the installer keeps its own stdin — the script drives python3
 	// through a heredoc, which a piped-to-bash script cannot reliably do.
 	microk8sInstall = "https://raw.githubusercontent.com/script-repo/AIDT/main/microk8s-install.sh"
+
+	// commandAtlasInstall deploys script-repo/showcase/005 behind an
+	// authenticating TLS proxy. The app itself brokers real shells and binds to
+	// loopback on purpose, so the installer leaves that alone and puts nginx in
+	// front rather than exposing the app directly.
+	commandAtlasInstall = "https://raw.githubusercontent.com/script-repo/AIDT/main/command-atlas-install.sh"
 )
 
 // np4mDebianVenvPreflight works around Debian-family Python installations where
@@ -138,6 +144,7 @@ func builtinCustomDeploys() []customDeploy {
 		{Name: "NP4M", ScriptURL: np4mInstall, Scheme: "https", Port: "8443"},
 		{Name: "NRCC", ScriptURL: nrccInstall, Scheme: "https", Port: "8443"},
 		{Name: "MicroK8s", ScriptURL: microk8sInstall},
+		{Name: "Command Atlas", ScriptURL: commandAtlasInstall, Scheme: "https", Port: "8443"},
 	}
 }
 

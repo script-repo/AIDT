@@ -183,8 +183,8 @@ Open Nutanix, press `c`, and select a definition:
 - Press `w` to choose an existing registered Ollama worker and install the
   workload alongside Ollama using managed SSH access.
 
-NP4M, NRCC, and MicroK8s are built in. NP4M and NRCC advertise their default
-HTTPS service on port `8443`. When several custom services share a worker, AIDT assigns ports in
+NP4M, NRCC, MicroK8s, and Command Atlas are built in. NP4M, NRCC, and Command
+Atlas advertise their default HTTPS service on port `8443`. When several custom services share a worker, AIDT assigns ports in
 sequence (`8443`, `8444`, `8445`, and so on through `8543`). Redeploying the
 same service reuses its registered port. NP4M and NRCC receive the assigned port
 through their supported installer environment variables. Custom definitions are
@@ -285,6 +285,43 @@ to the gateway over SSH stdin, never as a command argument and never into the
 deploy log, and it lands in a mode-`0600` file. Bastion setup is best effort: if
 it fails, the cluster is still deployed and registered, and the error is
 reported in Output.
+
+### Command Atlas
+
+[Command Atlas](https://github.com/script-repo/showcase/tree/main/005) is an
+interactive CLI mind-map with a live terminal deck. Installer:
+`command-atlas-install.sh` at the repository root.
+
+**It brokers real PTY shells to a browser page**, which is why the app binds to
+`127.0.0.1` and documents itself as never reachable from the network. That
+protection is kept: the deployment leaves the app on loopback and puts an
+authenticating nginx in front of it.
+
+| Layer | Where |
+| --- | --- |
+| Command Atlas (`systemd: command-atlas`) | `127.0.0.1:7420`, shells run as the deploy user |
+| nginx reverse proxy | `0.0.0.0:<service port>`, TLS + PAM basic auth |
+
+Signing in requires a **real local account on that host**, checked through PAM
+(`/etc/pam.d/command-atlas`). TLS is mandatory rather than cosmetic: basic auth
+sends a system password on every request, and a self-signed certificate is
+generated at install time — browsers warn once. The app's own token is held in a
+mode-`0600` env file and injected by nginx after authentication, so it never
+appears in a published link, a log line, or AIDT's saved settings.
+
+Overrides:
+
+| Variable | Effect |
+| --- | --- |
+| `AIDT_SERVICE_PORT` / `PORT` | Front-end HTTPS port (default `8443`). |
+| `AIDT_ATLAS_APP_PORT` | Loopback port for the app (default `7420`). |
+| `AIDT_ATLAS_USER` | Account the shells run as (default: the deploy user). |
+| `AIDT_ATLAS_REF` | Git ref of `script-repo/showcase` (default `main`). |
+
+If the nginx PAM module cannot be installed, or nginx rejects the generated
+configuration, the install **fails** rather than publishing an unauthenticated
+shell. Anyone with an account on that host can open a shell through this page,
+so remove the deployment when you are finished with it.
 
 After a custom setup command completes successfully, its service URL is saved
 in `~/.ai-deployment-toolkit/tui.json` and appears in Services. A setup script
