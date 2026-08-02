@@ -203,6 +203,17 @@ else
 fi
 $SUDO microk8s enable helm3 >/dev/null 2>&1 || true
 
+# --- kubectl ------------------------------------------------------------------
+# MicroK8s only provides the `microk8s kubectl` alias. A standalone binary lets
+# scripts and agents on this node use plain `kubectl` against the kubeconfig
+# written below.
+if command -v kubectl >/dev/null 2>&1; then
+	log "kubectl already installed: $(command -v kubectl)"
+else
+	log "installing kubectl…"
+	$SUDO snap install kubectl --classic
+fi
+
 # Point the standalone helm/kubectl at the MicroK8s cluster.
 KUBECONFIG_PATH="$TARGET_HOME/.kube/config"
 log "writing kubeconfig to ${KUBECONFIG_PATH}…"

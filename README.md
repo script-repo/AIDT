@@ -234,9 +234,38 @@ Overrides, set on the deployment definition or in the guest environment:
 | `MICROK8S_CHANNEL` | Snap channel (default `stable`). |
 
 The installer writes a kubeconfig to the deploy user's `~/.kube/config`, adds
-that user to the `microk8s` group, and enables `dns` and `helm3`. It reports the
-cluster into Services as `https://<node-ip>:16443` with the MetalLB pool shown
-alongside it. No storage addon is enabled.
+that user to the `microk8s` group, installs a standalone `kubectl` alongside the
+`microk8s kubectl` alias, and enables `dns` and `helm3`. It reports the cluster
+into Services as `https://<node-ip>:16443` with the MetalLB pool shown alongside
+it. No storage addon is enabled.
+
+#### Bastion access
+
+A cluster is only useful once something can reach it, so after a successful
+MicroK8s deploy AIDT turns the **Olla gateway into a bastion**: it installs
+`kubectl` there and merges the new cluster into the gateway user's
+`~/.kube/config`. SSH to the gateway and the cluster is already selected:
+
+```bash
+kubectl get nodes
+kubectl --context <vm-name> get nodes    # when several clusters are registered
+```
+
+`kubectl` is installed from the official release binary with its published
+SHA-256 verified, so this works on the Rocky guests AIDT provisions as well as
+on Ubuntu.
+
+Each cluster is merged under names derived from its VM (`<vm-name>`,
+`<vm-name>-cluster`, `<vm-name>-admin`). `microk8s config` always emits the same
+three names — `microk8s`, `microk8s-cluster`, and `admin` — so without renaming,
+a second cluster would silently overwrite the first. Existing contexts in the
+gateway's kubeconfig are preserved by the merge.
+
+The kubeconfig contains admin credentials. It is read from the node and written
+to the gateway over SSH stdin, never as a command argument and never into the
+deploy log, and it lands in a mode-`0600` file. Bastion setup is best effort: if
+it fails, the cluster is still deployed and registered, and the error is
+reported in Output.
 
 After a custom setup command completes successfully, its service URL is saved
 in `~/.ai-deployment-toolkit/tui.json` and appears in Services. A setup script

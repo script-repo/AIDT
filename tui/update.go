@@ -212,6 +212,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.notice = "read endpoints failed: " + msg.err.Error()
 		return m, nil
 
+	case bastionReadyMsg:
+		// The kubeconfig itself is deliberately absent from this message; only
+		// the script's own progress lines are logged, never its input.
+		for _, line := range strings.Split(strings.TrimRight(msg.log, "\n"), "\n") {
+			if strings.TrimSpace(line) != "" {
+				m.logLines = append(m.logLines, line)
+			}
+		}
+		if msg.err != nil {
+			m.logLines = append(m.logLines, "<<< bastion setup failed: "+msg.err.Error())
+			m.notice = "cluster deployed, but bastion setup failed — see Output"
+		} else {
+			m.logLines = append(m.logLines,
+				"<<< bastion ready on "+msg.host+" — ssh in and run: kubectl --context "+msg.context+" get nodes")
+			m.notice = "bastion ready on " + msg.host + " (context " + msg.context + ")"
+		}
+		m.renderLog()
+		return m, nil
+
 	case consoleReadyMsg:
 		if msg.err != nil {
 			m.notice = "key auth setup skipped (" + msg.err.Error() + ") — may prompt for password"
@@ -1777,6 +1796,9 @@ func (m model) handleProc(ev ProcEvent) (tea.Model, tea.Cmd) {
 			return m.handleBatchDone(ev)
 		}
 		m.procBusy = false
+		// Work to kick off once the outcome is known (bastion setup, inventory
+		// refresh), batched so a single return covers every exit path below.
+		var follow []tea.Cmd
 		custom := m.pendingCustom
 		m.pendingCustom = nil
 		wasLocalOlla := m.localOllaPending
@@ -1802,6 +1824,14 @@ func (m model) handleProc(ev ProcEvent) (tea.Model, tea.Cmd) {
 			} else {
 				m.notice = "deploy/delete finished"
 			}
+			// A MicroK8s cluster is only useful once something can talk to it,
+			// so make the gateway a bastion: kubectl plus this cluster's context.
+			if custom != nil && custom.cfg.ScriptURL == microk8sInstall {
+				if cmd := m.microk8sBastionCmd(*custom); cmd != nil {
+					follow = append(follow, cmd)
+					m.notice = custom.cfg.Name + " deployed — configuring bastion access…"
+				}
+			}
 			if forgotten := m.forgetAgentHost(deleteHosts...); len(forgotten) > 0 {
 				m.notice = fmt.Sprintf("VM deleted; deregistered %d agent(s): %s", len(forgotten), strings.Join(forgotten, ", "))
 			}
@@ -1817,7 +1847,10 @@ func (m model) handleProc(ev ProcEvent) (tea.Model, tea.Cmd) {
 		}
 		m.renderLog()
 		if m.pcCfg != nil && !wasLocalOlla {
-			return m, vmsCmd(m.pcCfg)
+			follow = append(follow, vmsCmd(m.pcCfg))
+		}
+		if len(follow) > 0 {
+			return m, tea.Batch(follow...)
 		}
 		return m, nil
 	}
