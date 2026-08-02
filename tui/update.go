@@ -1273,7 +1273,7 @@ func (m *model) openSelectedAgent() tea.Cmd {
 	return m.openAgentHostPick(a.name, "open")
 }
 
-// deploySelectedAgent always prompts for one worker or all known workers.
+// deploySelectedAgent prompts for the gateway, one worker, or all workers.
 func (m *model) deploySelectedAgent() tea.Cmd {
 	it, ok := m.agentsList.SelectedItem().(agentItem)
 	if !ok {
@@ -1289,20 +1289,9 @@ func (m *model) deploySelectedAgent() tea.Cmd {
 		m.notice = a.name + " needs no deploy — press enter/o to launch it"
 		return nil
 	}
-	hosts := m.agentWorkerHosts()
-	if len(hosts) == 0 {
-		m.notice = "no workers known — open Pool and press r first"
-		return nil
-	}
-	needsRemoteAuth := false
-	for _, host := range hosts {
-		if !isLocalHost(host) {
-			needsRemoteAuth = true
-			break
-		}
-	}
-	if needsRemoteAuth && m.sshPass == "" && managedKeyPath() == "" {
-		m.notice = "set an SSH password (reconnect) to deploy agents"
+	targets := m.agentPlacementRefs()
+	if len(targets) == 0 {
+		m.notice = "no gateway or workers available for agent placement"
 		return nil
 	}
 	return m.openAgentHostPick(a.name, "deploy")
@@ -1314,6 +1303,20 @@ func (m *model) agentWorkerHosts() []string {
 		hosts = append(hosts, w.host)
 	}
 	return hosts
+}
+
+// agentPlacementRefs returns the connected gateway followed by every discovered
+// Ollama worker. A host present in both roles is shown once as the gateway.
+func (m *model) agentPlacementRefs() []workerRef {
+	var targets []workerRef
+	if host := hostFromURL(m.gateway); host != "" {
+		targets = append(targets, workerRef{name: "Gateway: " + m.gatewayServiceName(), host: host})
+	}
+	for _, worker := range uniqueWorkerRefs(workersFromEndpoints(m.endpoints)) {
+		worker.name = "Worker: " + worker.name
+		targets = append(targets, worker)
+	}
+	return uniqueWorkerRefs(targets)
 }
 
 // agentDeployedHosts returns every host an agent is registered as deployed on.
@@ -1353,15 +1356,15 @@ func (m *model) removeSelectedAgent() tea.Cmd {
 // startAgent dispatches the open/deploy of an agent against a resolved host.
 func (m *model) startAgent(a agentDef, act, host string) tea.Cmd {
 	if host == "" {
-		if a.target == "worker" {
-			m.notice = "no workers known — open Pool and press r first"
-		} else {
-			m.notice = "connect to a gateway first"
-		}
+		m.notice = "no gateway or workers available for agent placement"
 		return nil
 	}
 	local := isLocalHost(host)
 	if act == "deploy" {
+		if !local && m.sshPass == "" && managedKeyPath() == "" {
+			m.notice = "set an SSH password (reconnect) to deploy agents remotely"
+			return nil
+		}
 		where := host
 		if local {
 			where = "this host"
@@ -1410,6 +1413,14 @@ func (m *model) startAgentMany(a agentDef, hosts []string) tea.Cmd {
 	if len(hosts) == 0 {
 		m.notice = "no workers known — open Pool and press r first"
 		return nil
+	}
+	if m.sshPass == "" && managedKeyPath() == "" {
+		for _, host := range hosts {
+			if !isLocalHost(host) {
+				m.notice = "set an SSH password (reconnect) to deploy agents remotely"
+				return nil
+			}
+		}
 	}
 	scripts := m.agentDeployScripts(a, hosts)
 	opts := agentBatchDeployOptions{scripts: scripts, crushConfig: m.crushConfigJSON()}

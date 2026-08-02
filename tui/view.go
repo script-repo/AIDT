@@ -306,7 +306,7 @@ func (m model) viewAgents() string {
 	}
 	loc := dimStyle.Render(fmt.Sprintf("  gateway %s · worker %s", orDefault(gw, "-"), worker))
 	hint := dimStyle.Render("enter/o open (ssh + launch CLI) · d deploy · x remove · e Telegram/gateway · r refresh · / filter")
-	note := dimStyle.Render("Crush → Olla server · Hermes → Olla OpenAI endpoint")
+	note := dimStyle.Render("Deploy any agent to the gateway, one worker, or all workers")
 
 	gwState := "off (deploy launches CLI) · e to configure"
 	if m.hermesGatewayWanted() {

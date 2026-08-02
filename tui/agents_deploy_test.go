@@ -350,10 +350,10 @@ func TestEveryAgentDeployPreparesObsidianVaultFirst(t *testing.T) {
 	}
 }
 
-func TestAgentCatalogDeploysToWorkers(t *testing.T) {
+func TestAgentCatalogSupportsGatewayAndWorkerPlacement(t *testing.T) {
 	for _, a := range agentCatalog {
-		if a.target != "worker" {
-			t.Errorf("%s target = %q, want worker", a.name, a.target)
+		if a.target != "gateway / worker" {
+			t.Errorf("%s target = %q, want gateway / worker", a.name, a.target)
 		}
 	}
 }
@@ -368,6 +368,59 @@ func TestAgentWorkerHostsDeduplicatesEndpoints(t *testing.T) {
 	}
 	if got := strings.Join(m.agentWorkerHosts(), ","); got != "10.0.0.2,10.0.0.3" {
 		t.Fatalf("agent worker hosts = %q", got)
+	}
+}
+
+func TestAgentPlacementIncludesGatewayAndWorkers(t *testing.T) {
+	m := newModel("http://10.0.0.1:40114", "rocky", "pw")
+	m.vms = []VM{{Name: "aidt-gateway-01", IP: "10.0.0.1", Role: "gateway"}}
+	m.endpoints = []endpointEntry{
+		{Name: "gateway-alias", URL: "http://10.0.0.1:11434", Type: "ollama"},
+		{Name: "aidt-worker-01", URL: "http://10.0.0.2:11434", Type: "ollama"},
+	}
+	targets := m.agentPlacementRefs()
+	if len(targets) != 2 {
+		t.Fatalf("agent placement target count = %d, want gateway + worker", len(targets))
+	}
+	if targets[0].host != "10.0.0.1" || targets[0].name != "Gateway: aidt-gateway-01" {
+		t.Fatalf("gateway placement = %#v", targets[0])
+	}
+	if targets[1].host != "10.0.0.2" || targets[1].name != "Worker: aidt-worker-01" {
+		t.Fatalf("worker placement = %#v", targets[1])
+	}
+}
+
+func TestAgentCanDeployWithOnlyGatewayAvailable(t *testing.T) {
+	m := newModel("http://10.0.0.1:40114", "rocky", "pw")
+	m.endpoints = nil
+	m.refreshAgents()
+	cmd := m.deploySelectedAgent()
+	if cmd == nil || m.form == nil {
+		t.Fatal("gateway-only agent placement did not open the deploy picker")
+	}
+	if m.fAgentHost != "10.0.0.1" {
+		t.Fatalf("gateway-only picker selected %q", m.fAgentHost)
+	}
+	if len(m.pendingAgentHosts) != 0 {
+		t.Fatalf("gateway was included in all-workers snapshot: %v", m.pendingAgentHosts)
+	}
+}
+
+func TestAgentDeployPickerKeepsAllWorkersSeparateFromGateway(t *testing.T) {
+	m := newModel("http://10.0.0.1:40114", "rocky", "pw")
+	m.endpoints = []endpointEntry{
+		{Name: "worker-1", URL: "http://10.0.0.2:11434", Type: "ollama"},
+		{Name: "worker-2", URL: "http://10.0.0.3:11434", Type: "ollama"},
+	}
+	cmd := m.openAgentHostPick("OpenCode", "deploy")
+	if cmd == nil || m.form == nil {
+		t.Fatal("gateway and worker placement picker did not open")
+	}
+	if m.fAgentHost != "10.0.0.1" {
+		t.Fatalf("default placement = %q, want gateway", m.fAgentHost)
+	}
+	if got := strings.Join(m.pendingAgentHosts, ","); got != "10.0.0.2,10.0.0.3" {
+		t.Fatalf("all-workers snapshot = %q", got)
 	}
 }
 
@@ -431,7 +484,7 @@ func TestAgentBatchDeploymentRegistersSuccessfulWorkers(t *testing.T) {
 	}
 
 	item := agentItem{name: "OpenCode", desc: "coding agent", endpoint: "Olla", registered: true, regHost: "10.0.0.2", regCount: 2}
-	if !strings.Contains(item.Description(), "deployed on 2 workers") {
+	if !strings.Contains(item.Description(), "deployed on 2 hosts") {
 		t.Fatalf("multi-worker agent description = %q", item.Description())
 	}
 }

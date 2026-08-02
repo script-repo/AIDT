@@ -494,52 +494,51 @@ func (m *model) openCustomWorkerPick(cfg customDeploy) tea.Cmd {
 	return m.form.Init()
 }
 
-// openAgentHostPick lets the user choose one worker, or every worker for deploys.
+// openAgentHostPick lets the user choose the gateway, one worker, or every
+// worker for deploys. Open only shows hosts where the agent is registered.
 func (m *model) openAgentHostPick(agentName, act string) tea.Cmd {
-	ws := uniqueWorkerRefs(workersFromEndpoints(m.endpoints))
+	targets := m.agentPlacementRefs()
 	if act == "open" {
 		deployed := m.agentDeployedHosts(agentName)
 		if len(deployed) > 0 {
 			byHost := map[string]workerRef{}
-			for _, w := range ws {
+			for _, w := range targets {
 				byHost[w.host] = w
 			}
-			ws = ws[:0]
+			targets = targets[:0]
 			for _, host := range deployed {
 				w, ok := byHost[host]
 				if !ok {
 					w = workerRef{name: host, host: host}
 				}
-				ws = append(ws, w)
+				targets = append(targets, w)
 			}
 		}
 	}
-	if len(ws) == 0 {
-		m.notice = "no workers known — open Pool and press r first"
+	if len(targets) == 0 {
+		m.notice = "no gateway or workers available for agent placement"
 		return nil
 	}
 	m.pendingAgent, m.pendingAct = agentName, act
 	m.pendingAgentHosts = nil
 	if act == "deploy" {
-		for _, w := range ws {
-			m.pendingAgentHosts = append(m.pendingAgentHosts, w.host)
-		}
+		m.pendingAgentHosts = m.agentWorkerHosts()
 	}
-	m.fAgentHost = ws[0].host
+	m.fAgentHost = targets[0].host
 	if h := m.agentReg[agentName]; h != "" {
-		for _, w := range ws {
+		for _, w := range targets {
 			if w.host == h {
 				m.fAgentHost = h
 				break
 			}
 		}
 	}
-	opts := make([]huh.Option[string], 0, len(ws)+1)
-	for _, w := range ws {
+	opts := make([]huh.Option[string], 0, len(targets)+1)
+	for _, w := range targets {
 		opts = append(opts, huh.NewOption(w.name+"  ("+w.host+")", w.host))
 	}
-	if act == "deploy" && len(ws) > 1 {
-		opts = append(opts, huh.NewOption(fmt.Sprintf("All worker nodes (%d)", len(ws)), "all"))
+	if act == "deploy" && len(m.pendingAgentHosts) > 1 {
+		opts = append(opts, huh.NewOption(fmt.Sprintf("All worker nodes (%d)", len(m.pendingAgentHosts)), "all"))
 	}
 	verb := act
 	if verb != "" {
@@ -547,7 +546,7 @@ func (m *model) openAgentHostPick(agentName, act string) tea.Cmd {
 	}
 	fields := []huh.Field{
 		huh.NewSelect[string]().Key("agenthost").
-			Title(verb + " " + agentName + " on which worker?").
+			Title(verb + " " + agentName + " on which host?").
 			Options(opts...).Value(&m.fAgentHost),
 	}
 	m.modal = modalAgentHost

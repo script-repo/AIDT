@@ -292,13 +292,13 @@ The current catalog contains:
 - **Hermes**: configured to use Olla as a custom provider. Optional Telegram
   gateway settings are available.
 
-Press `d` in the Agents section to deploy the selected agent, then choose one
-worker or all discovered workers. Press `Enter` or `o` to choose and open a
-registered installation over SSH. Removal uninstalls the selected agent from
-one or all registered hosts. Removing a gateway or worker VM through AIDT also
-clears any agent registrations on that host. If a host was already deleted
-externally, Remove still clears the stale registration and reports remote
-cleanup as unconfirmed.
+Press `d` in the Agents section to deploy the selected agent, then choose the
+gateway, one discovered worker, or all discovered workers. Press `Enter` or `o`
+to choose and open a registered installation over SSH. Removal uninstalls the
+selected agent from one or all registered hosts. Removing a gateway or worker
+VM through AIDT also clears any agent registrations on that host. If a host was
+already deleted externally, Remove still clears the stale registration and
+reports remote cleanup as unconfirmed.
 
 Before installing an agent, AIDT checks for Obsidian and installs the official
 AppImage when it is absent. Every agent launches in the shared Obsidian vault

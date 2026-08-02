@@ -84,7 +84,7 @@ func (i agentItem) Title() string {
 func (i agentItem) Description() string {
 	if i.registered {
 		if i.regCount > 1 {
-			return fmt.Sprintf("%s · %s · deployed on %d workers (primary %s)", i.desc, i.endpoint, i.regCount, i.regHost)
+			return fmt.Sprintf("%s · %s · deployed on %d hosts (primary %s)", i.desc, i.endpoint, i.regCount, i.regHost)
 		}
 		return fmt.Sprintf("%s · %s · deployed on %s", i.desc, i.endpoint, i.regHost)
 	}

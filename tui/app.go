@@ -173,12 +173,12 @@ type model struct {
 	imageByID map[string]string
 
 	// agent registrations: agentReg holds the preferred open host per agent;
-	// agentHosts tracks every worker where it is installed.
+	// agentHosts tracks every gateway or worker where it is installed.
 	agentReg          map[string]string
 	agentHosts        map[string][]string
 	pendingAgent      string   // agent awaiting host pick
 	pendingAct        string   // "open" | "deploy"
-	pendingAgentHosts []string // worker snapshot shown by the deploy picker
+	pendingAgentHosts []string // worker snapshot used by the all-workers option
 	agentBusy         bool     // a multi-worker deployment or removal is running
 	agentInstances    int      // container count for the next containerized-agent deploy
 	chatVP            viewport.Model

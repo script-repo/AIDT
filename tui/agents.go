@@ -19,7 +19,7 @@ type agentDef struct {
 	cli        string // command to (re)launch an existing install
 	deployable bool   // whether the TUI can install it
 	container  bool   // runs as Docker container(s) on the host (multi-instance)
-	target     string // "gateway" or "worker"
+	target     string // placement summary shown in the Agents list
 	endpoint   string // how it reaches models (informational)
 	desc       string
 }
@@ -247,14 +247,14 @@ const crushOpenCommand = `mkdir -p "$HOME/Obsidian/AIDT-Agent-Vault/.obsidian" &
 
 // agentCatalog is the set of agents offered in the Agents section.
 //
-// All agents deploy to one or every selected worker and reach models through the
-// Olla gateway, which load-balances across the whole pool.
+// All agents deploy to the gateway, one worker, or every selected worker and
+// reach models through the Olla gateway, which load-balances the whole pool.
 var agentCatalog = []agentDef{
 	{
 		name:       "Crush",
 		cli:        "crush",
 		deployable: true,
-		target:     "worker",
+		target:     "gateway / worker",
 		endpoint:   "Olla OpenAI endpoint (whole pool)",
 		desc:       "Charm coding agent",
 	},
@@ -262,7 +262,7 @@ var agentCatalog = []agentDef{
 		name:       "OpenCode",
 		cli:        "opencode",
 		deployable: true,
-		target:     "worker",
+		target:     "gateway / worker",
 		endpoint:   "Olla OpenAI endpoint (whole pool)",
 		desc:       "Open-source coding agent",
 	},
@@ -270,7 +270,7 @@ var agentCatalog = []agentDef{
 		name:       "Goose",
 		cli:        "goose session",
 		deployable: true,
-		target:     "worker",
+		target:     "gateway / worker",
 		endpoint:   "Olla OpenAI endpoint (whole pool)",
 		desc:       "AAIF open-source AI agent",
 	},
@@ -278,7 +278,7 @@ var agentCatalog = []agentDef{
 		name:       "Grok Build",
 		cli:        "grok",
 		deployable: true,
-		target:     "worker",
+		target:     "gateway / worker",
 		endpoint:   "Olla OpenAI endpoint (whole pool)",
 		desc:       "xAI terminal coding agent",
 	},
@@ -286,7 +286,7 @@ var agentCatalog = []agentDef{
 		name:       "Claude Code",
 		cli:        "claude",
 		deployable: true,
-		target:     "worker",
+		target:     "gateway / worker",
 		endpoint:   "Olla Anthropic endpoint (whole pool)",
 		desc:       "Anthropic coding agent",
 	},
@@ -294,7 +294,7 @@ var agentCatalog = []agentDef{
 		name:       "Codex",
 		cli:        "codex",
 		deployable: true,
-		target:     "worker",
+		target:     "gateway / worker",
 		endpoint:   "Olla OpenAI endpoint (whole pool)",
 		desc:       "OpenAI terminal coding agent",
 	},
@@ -302,7 +302,7 @@ var agentCatalog = []agentDef{
 		name:       "Hermes",
 		cli:        "hermes",
 		deployable: true,
-		target:     "worker",
+		target:     "gateway / worker",
 		endpoint:   "Olla OpenAI endpoint (whole pool)",
 		desc:       "Nous Research self-improving agent",
 	},
@@ -1104,8 +1104,8 @@ func agentUninstallCmd(a agentDef, hosts []string, user, pass string) tea.Cmd {
 	}
 }
 
-// agentDeployManyCmd runs the headless deployment on every selected worker in
-// parallel. Successful hosts are registered even when another worker fails.
+// agentDeployManyCmd runs the headless deployment on every selected host in
+// parallel. Successful hosts are registered even when another host fails.
 type agentBatchDeployOptions struct {
 	scripts         map[string]string
 	crushConfig     string
@@ -1240,18 +1240,6 @@ func (m *model) forgetAgentHost(hosts ...string) []string {
 		m.refreshAgents()
 	}
 	return forgotten
-}
-
-// agentHost resolves a default host for an agent: the gateway (Olla server) for
-// gateway-targeted agents, else the first known Ollama worker.
-func (m *model) agentHost(a agentDef) string {
-	if a.target == "worker" {
-		if ws := workersFromEndpoints(m.endpoints); len(ws) > 0 {
-			return ws[0].host
-		}
-		return ""
-	}
-	return hostFromURL(m.gateway)
 }
 
 // loginShell wraps a simple command so it runs in a login shell, picking up the
