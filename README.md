@@ -109,7 +109,9 @@ execution risks.
 
 AIDT uses a left sidebar and a focused content pane. Press `Enter` to focus a
 section and `Esc` to return to the sidebar. Number keys `1` through `9` jump to
-the first nine sections; `0` opens Update.
+the first nine sections; `0` opens Update. App Deploy and K8S are reached from
+the sidebar — there are only ten number keys, and the sections that predate them
+keep the shortcuts they have always had.
 
 | Section | Purpose |
 | --- | --- |
@@ -123,6 +125,8 @@ the first nine sections; `0` opens Update.
 | Services | List gateway, worker, agent-server, and custom-service URLs with direct clickable links. `x` removes a custom-service listing without touching the workload. |
 | Access | Show client endpoint values, model selection, and example requests. |
 | Update | Update AIDT, guests, Olla, Ollama, agents, images, and Ollama cloud keys. |
+| App Deploy | Install Helm charts and manifests onto the clusters listed in K8S. Deployed apps are coloured differently from undeployed ones. |
+| K8S | List, add, and remove the Kubernetes clusters in the gateway's kubeconfig. |
 
 Common keys:
 
@@ -358,6 +362,73 @@ VM name (for example, `aidt-gateway-03`) instead of a generic label.
 On Linux, the Nutanix section can install Olla on the machine running AIDT
 instead of creating a gateway VM. This executes
 `scripts/remote/install-olla.sh` as root or through non-interactive `sudo`.
+
+## App Deploy And K8S
+
+These two sections install workloads onto Kubernetes clusters. They are the
+cluster-native counterpart to the custom deployments above: those provision a VM
+and run a setup script, these install a chart or manifest into a cluster that
+already exists.
+
+Everything runs **on the Olla gateway**, not on the machine running AIDT. The
+gateway is already the operator's bastion (see [MicroK8s](#microk8s)): `kubectl`
+lives there and every cluster AIDT knows about is merged into its kubeconfig.
+`helm` is installed there on first use, from the official release with its
+published checksum verified. AIDT needs no local `kubectl` or `helm`.
+
+### K8S
+
+Lists the contexts in the gateway's `~/.kube/config`. The list is read live on
+every refresh rather than cached, because it decides where workloads land and a
+stale entry would mean deploying into the wrong cluster. Credentials never reach
+the TUI: the contexts are read through `kubectl config view`, which redacts
+certificates and tokens but keeps the names and server URLs shown here.
+
+| Key | Action |
+| --- | --- |
+| `a` | Add a cluster: fetch from a MicroK8s node over SSH, or import a kubeconfig already on the gateway. |
+| `x` | Remove the entry from the gateway's kubeconfig. |
+| `Enter` | Make the selected cluster the gateway's current context. |
+| `r` | Re-read the kubeconfig and reconcile recorded app installs. |
+
+Removing an entry only stops AIDT reaching that cluster. It does not delete the
+cluster or anything running on it. The kubeconfig is backed up to
+`config.aidt-bak` before any change, and a cluster or user still referenced by
+another context is left in place.
+
+### App Deploy
+
+Each application is either a Helm chart (repository plus chart, or an `oci://`
+reference) or a manifest URL applied with `kubectl apply -f`. The distinction is
+recorded on every installation, because it decides how the workload is removed
+again — a definition edited after it was installed is still uninstalled the way
+it was created.
+
+| Key | Action |
+| --- | --- |
+| `Tab` / `Shift+Tab` | Move through the catalog (`Up`/`Down` and `k`/`j` also work). |
+| `d` | Deploy: pick a cluster context, namespace, and deployment name. |
+| `x` | Remove an installation from its cluster. |
+| `a` / `e` | Add or edit an application definition. |
+| `X` | Drop the definition from the catalog, leaving deployed workloads running. |
+
+Rows are coloured by state: grey when the app is deployed nowhere, green once it
+is installed, and amber when a recorded installation was not found in its
+cluster at the last refresh. Deploying the same app to another context — or to
+the same context under a different deployment name — creates a second
+installation, so one application can run on many clusters at once. Helm installs
+run as `upgrade --install`, so pressing `d` again converges rather than failing.
+
+The registry of what is installed where lives in
+`~/.ai-deployment-toolkit/tui.json` and is written only after a deploy or remove
+exits successfully, so a failed deploy never leaves an app showing as running.
+
+Built-in applications are seeded on first launch and topped up when a later AIDT
+release adds one, using the same ledger as the custom deployments — so deleting
+one sticks. Bitnami charts are deliberately absent: the public Bitnami image
+catalog was withdrawn in 2025 and those charts install but cannot pull their
+images, so PostgreSQL is served by CloudNativePG and Redis by the
+ot-container-kit operator.
 
 ## Prism Configuration
 

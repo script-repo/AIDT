@@ -123,6 +123,10 @@ func (m model) sectionBody() string {
 		return m.viewLoad()
 	case secNutanix:
 		return m.viewNutanix()
+	case secApps:
+		return m.viewApps()
+	case secK8s:
+		return m.viewK8s()
 	case secServices:
 		return m.viewServices()
 	case secAccess:
@@ -405,6 +409,77 @@ func (m model) viewCustomDeploys() string {
 	return lipgloss.JoinVertical(lipgloss.Left, rows...)
 }
 
+// ---- section: app deploy ---------------------------------------------------
+
+func (m model) viewApps() string {
+	busy := dimStyle.Render("d deploy · x remove from cluster · a add · e edit · X drop from catalog · r refresh · / filter")
+	if m.appBusy || m.procBusy {
+		busy = m.spin.View() + " " + warnStyle.Render("running…")
+	}
+
+	// Say plainly what the section can and cannot do right now. Both of these
+	// are ordinary first-run states, not errors.
+	var status string
+	switch {
+	case hostFromURL(m.gateway) == "":
+		status = warnStyle.Render("No gateway connected — press c on the sidebar. Deploys run there, not on this machine.")
+	case len(m.k8sContexts) == 0:
+		status = warnStyle.Render("No clusters known — open K8S and press a to add one.")
+	default:
+		deployed := 0
+		for _, a := range m.apps {
+			if len(m.appDeploymentsFor(a.Name)) > 0 {
+				deployed++
+			}
+		}
+		status = dimStyle.Render(fmt.Sprintf("%s across %s · %s deployed",
+			plural(len(m.apps), "application", "applications"),
+			plural(len(m.k8sContexts), "cluster", "clusters"),
+			plural(deployed, "app", "apps")))
+	}
+
+	return lipgloss.JoinVertical(lipgloss.Left,
+		labelStyle.Render("Applications")+dimStyle.Render("  (helm charts & manifests)"),
+		m.appsList.View(),
+		status,
+		labelStyle.Render("Output")+"  "+busy,
+		m.logVP.View(),
+	)
+}
+
+// ---- section: k8s ----------------------------------------------------------
+
+func (m model) viewK8s() string {
+	busy := dimStyle.Render("enter set current · a add · x remove entry · r refresh · / filter")
+	if m.procBusy {
+		busy = m.spin.View() + " " + warnStyle.Render("updating kubeconfig…")
+	}
+
+	var status string
+	switch {
+	case hostFromURL(m.gateway) == "":
+		status = warnStyle.Render("No gateway connected — press c on the sidebar.")
+	case m.k8sLoading:
+		status = dimStyle.Render(m.spin.View() + " reading the gateway's kubeconfig…")
+	case m.k8sErr != "":
+		status = warnStyle.Render(m.k8sErr)
+	case len(m.k8sContexts) == 0:
+		status = dimStyle.Render("No clusters in the gateway's kubeconfig yet. Press a to add one,\nor deploy MicroK8s from Nutanix → custom deployments.")
+	default:
+		// x is destructive-sounding next to a list of clusters; it is not.
+		status = dimStyle.Render("Clusters live in ~/.kube/config on " + hostFromURL(m.gateway) +
+			". Removing an entry here only stops AIDT reaching the cluster —\nit does not delete the cluster or anything running on it.")
+	}
+
+	return lipgloss.JoinVertical(lipgloss.Left,
+		labelStyle.Render("Kubernetes clusters")+dimStyle.Render("  (gateway kubeconfig)"),
+		m.k8sList.View(),
+		status,
+		labelStyle.Render("Output")+"  "+busy,
+		m.logVP.View(),
+	)
+}
+
 // ---- section: services -----------------------------------------------------
 
 func (m model) viewServices() string {
@@ -554,6 +629,10 @@ func (m model) shortHelp() []key.Binding {
 		mid = []key.Binding{m.km.ServiceOpen, m.km.ServiceForget, m.km.Filter, m.km.Refresh, m.km.Back}
 	case secUpdate:
 		mid = []key.Binding{m.km.Open, m.km.Back}
+	case secApps:
+		mid = []key.Binding{m.km.AppDeploy, m.km.AppRemove, m.km.AppAdd, m.km.AppEdit, m.km.AppForget, m.km.Filter, m.km.Back}
+	case secK8s:
+		mid = []key.Binding{m.km.K8sUse, m.km.K8sAdd, m.km.K8sRemove, m.km.K8sRefresh, m.km.Filter, m.km.Back}
 	default:
 		mid = []key.Binding{m.km.Back}
 	}
@@ -568,8 +647,9 @@ func (m model) fullHelp() [][]key.Binding {
 	}
 	access := []key.Binding{m.km.Console, m.km.ConsoleGW, m.km.AgentOpen, m.km.AgentDeploy, m.km.Token, m.km.ClearToken}
 	nutanix := []key.Binding{m.km.Deploy, m.km.Worker, m.km.CustomWorker, m.km.OllaLocal, m.km.EditCfg, m.km.Delete, m.km.NextName}
+	kube := []key.Binding{m.km.AppDeploy, m.km.AppRemove, m.km.AppAdd, m.km.AppEdit, m.km.AppForget, m.km.K8sAdd, m.km.K8sRemove}
 	global := []key.Binding{m.km.Send, m.km.NewSession, m.km.Help, m.km.Quit}
-	return [][]key.Binding{nav, actions, access, nutanix, global}
+	return [][]key.Binding{nav, actions, access, nutanix, kube, global}
 }
 
 // ---- render helpers (chat / log) -------------------------------------------

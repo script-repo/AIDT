@@ -426,6 +426,17 @@ type tuiSettings struct {
 	SeededBuiltins []string          `json:"seeded_builtins,omitempty"`
 	Services       []serviceLink     `json:"services,omitempty"` // successfully deployed custom services
 	VMImages       map[string]string `json:"vm_images"`          // VM name -> source image name
+
+	// App Deploy: the catalog of deployable workloads, the ledger of built-ins
+	// this install has been offered (same contract as SeededBuiltins), and the
+	// record of what has actually been installed where.
+	//
+	// The clusters themselves are deliberately not persisted: they are read live
+	// from the gateway's kubeconfig, which is the only thing that can be
+	// authoritative about where a workload would land.
+	Apps       []k8sApp        `json:"k8s_apps,omitempty"`
+	AppsSeeded []string        `json:"k8s_apps_seeded,omitempty"`
+	AppDeploys []appDeployment `json:"k8s_app_deployments,omitempty"`
 }
 
 // buzzSettings persists the operator key and default channel id for the Buzz
@@ -660,6 +671,26 @@ func saveCustomDeploys(path string, cds []customDeploy, seededBuiltins ...[]stri
 func saveServices(path string, services []serviceLink) error {
 	s := loadSettings(path)
 	s.Services = services
+	return saveSettings(path, s)
+}
+
+// saveApps persists the App Deploy catalog and marks the built-ins as seeded,
+// so deleting them all does not re-add them on the next launch.
+func saveApps(path string, apps []k8sApp, seeded ...[]string) error {
+	s := loadSettings(path)
+	s.Apps = apps
+	// Variadic for the same reason as saveCustomDeploys: add/delete call sites
+	// stay unchanged and simply preserve the existing ledger.
+	if len(seeded) > 0 {
+		s.AppsSeeded = seeded[0]
+	}
+	return saveSettings(path, s)
+}
+
+// saveAppDeploys persists the record of which apps are installed where.
+func saveAppDeploys(path string, ds []appDeployment) error {
+	s := loadSettings(path)
+	s.AppDeploys = ds
 	return saveSettings(path, s)
 }
 

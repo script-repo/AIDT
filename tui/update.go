@@ -335,6 +335,35 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case k8sContextsMsg:
+		m.k8sLoading = false
+		if msg.err != nil {
+			m.k8sErr = msg.err.Error()
+			m.k8sContexts = nil
+		} else {
+			m.k8sErr = ""
+			m.k8sContexts = msg.contexts
+		}
+		m.refreshK8sList()
+		// Recorded installs are only worth reconciling once we know which
+		// clusters are actually reachable.
+		if msg.err == nil && len(m.appDeploys) > 0 {
+			if host := hostFromURL(m.gateway); host != "" {
+				return m, appReconcileCmd(host, orDefault(m.sshUser, "rocky"), m.sshPass, m.appDeploys)
+			}
+		}
+		return m, nil
+
+	case appReconcileMsg:
+		if msg.err != nil {
+			m.notice = "could not check deployed apps: " + msg.err.Error()
+			return m, nil
+		}
+		if gone := m.applyAppReconcile(msg.missing); gone > 0 {
+			m.notice = fmt.Sprintf("%d recorded app install(s) are no longer in their cluster", gone)
+		}
+		return m, nil
+
 	case notifyMsg:
 		m.notice = string(msg)
 		var cmds []tea.Cmd
@@ -422,6 +451,9 @@ func (m *model) applyLayout(w, h int) {
 	m.updateList.SetSize(m.contentW, vmsH)
 	// The custom-deploy submenu also shares the Nutanix layout (list + Output).
 	m.customList.SetSize(m.contentW, vmsH)
+	// App Deploy and K8S both stream a deploy log, so they share that layout too.
+	m.appsList.SetSize(m.contentW, vmsH)
+	m.k8sList.SetSize(m.contentW, vmsH)
 
 	m.composer.SetWidth(m.contentW)
 	chatH := maxInt(m.contentH-6, 3)
@@ -454,11 +486,13 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	// Quick section jump (unless we're typing or filtering a list). '0' selects
-	// the last section so all sections stay reachable by number.
+	// the tenth section, which is as far as ten keys reach; sections added after
+	// that are reached from the sidebar rather than by renumbering the ones
+	// operators already have in their fingers.
 	if !m.isTyping() && len(k) == 1 && (k[0] >= '1' && k[0] <= '9' || k[0] == '0') {
 		idx := int(k[0] - '1')
 		if k[0] == '0' {
-			idx = len(sections) - 1
+			idx = numberedSections - 1
 		}
 		if idx < len(sections) {
 			m.section = section(idx)
@@ -495,6 +529,10 @@ func (m *model) activeList() *list.Model {
 		return &m.vmsList
 	case secAgents:
 		return &m.agentsList
+	case secApps:
+		return &m.appsList
+	case secK8s:
+		return &m.k8sList
 	case secServices:
 		return &m.servicesList
 	case secUpdate:
@@ -731,6 +769,65 @@ func (m model) handleContentKey(msg tea.KeyMsg, k string) (tea.Model, tea.Cmd) {
 		}
 		nl, cmd := m.agentsList.Update(msg)
 		m.agentsList = nl
+		return m, cmd
+
+	case secApps:
+		switch k {
+		case "esc", "left", "h":
+			m.leaveContent()
+			return m, nil
+		// tab/shift+tab cycle the catalog, so the section can be driven without
+		// leaving the home row or reaching for the arrow keys.
+		case "tab":
+			m.appsList.CursorDown()
+			return m, nil
+		case "shift+tab":
+			m.appsList.CursorUp()
+			return m, nil
+		case "d", "enter":
+			return m, m.deploySelectedApp()
+		case "x", "delete":
+			return m, m.removeSelectedApp()
+		case "a":
+			return m, m.openAppAdd()
+		case "e":
+			if it, ok := m.selectedAppItem(); ok && !it.add {
+				if a, found := m.appByName(it.name); found {
+					return m, m.openAppEdit(a, a.Name)
+				}
+			}
+			return m, nil
+		case "X":
+			// Distinct from x ("remove from cluster"): this only drops the
+			// catalog definition and leaves running workloads alone.
+			if it, ok := m.selectedAppItem(); ok && !it.add {
+				m.deleteApp(it.name)
+				m.notice = "removed " + it.name + " from the catalog (deployments untouched)"
+			}
+			return m, nil
+		case "r":
+			return m, m.refreshK8sCmd()
+		}
+		nl, cmd := m.appsList.Update(msg)
+		m.appsList = nl
+		return m, cmd
+
+	case secK8s:
+		switch k {
+		case "esc", "left", "h":
+			m.leaveContent()
+			return m, nil
+		case "enter":
+			return m, m.useSelectedK8s()
+		case "a":
+			return m, m.openK8sAdd()
+		case "x", "delete":
+			return m, m.removeSelectedK8s()
+		case "r":
+			return m, m.refreshK8sCmd()
+		}
+		nl, cmd := m.k8sList.Update(msg)
+		m.k8sList = nl
 		return m, cmd
 
 	case secNutanix:
@@ -1809,6 +1906,32 @@ func (m model) handleProc(ev ProcEvent) (tea.Model, tea.Cmd) {
 			return m.handleBatchDone(ev)
 		}
 		m.procBusy = false
+
+		// An App Deploy run owns its own bookkeeping and none of the VM-oriented
+		// cleanup below applies to it, so it settles here and returns.
+		if m.pendingApp != nil {
+			if ev.Code == 0 {
+				m.logLines = append(m.logLines, "<<< done")
+			} else {
+				m.logLines = append(m.logLines, fmt.Sprintf("<<< failed (rc=%d)", ev.Code))
+			}
+			m.finishAppRun(ev.Code)
+			m.renderLog()
+			return m, nil
+		}
+		// A kubeconfig change on the gateway makes the cluster list stale, so
+		// re-read it rather than leaving a removed context on screen.
+		if m.section == secK8s {
+			if ev.Code == 0 {
+				m.logLines = append(m.logLines, "<<< done")
+				m.notice = "kubeconfig updated"
+			} else {
+				m.logLines = append(m.logLines, fmt.Sprintf("<<< failed (rc=%d)", ev.Code))
+				m.notice = fmt.Sprintf("kubeconfig change failed (rc=%d) — see Output", ev.Code)
+			}
+			m.renderLog()
+			return m, m.refreshK8sCmd()
+		}
 		// Work to kick off once the outcome is known (bastion setup, inventory
 		// refresh), batched so a single return covers every exit path below.
 		var follow []tea.Cmd

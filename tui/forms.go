@@ -595,6 +595,146 @@ func (m *model) fsecret(key string) string {
 	return m.form.GetString(key)
 }
 
+// ---- App Deploy / K8S forms -------------------------------------------------
+
+// openAppDeploy asks where an application should be installed.
+//
+// The context comes from the live cluster list rather than free text: it is the
+// one field where a typo silently installs into the wrong place. Namespace and
+// release name are pre-filled so the common case is three keystrokes.
+func (m *model) openAppDeploy(a k8sApp) tea.Cmd {
+	ctxs := m.k8sContextNames()
+	m.fAppCtx = ctxs[0]
+	if cur := m.currentK8sContext(); cur != "" {
+		m.fAppCtx = cur
+	}
+	m.fAppNS = a.defaultNamespace()
+	m.fAppRelease = slugifyName(a.Name)
+	m.appEditingName = a.Name
+
+	src := a.Chart
+	if a.kind() == appKindManifest {
+		src = a.ManifestURL
+	}
+	m.modal = modalAppDeploy
+	m.form = huh.NewForm(huh.NewGroup(
+		huh.NewNote().Title("Deploy "+a.Name).
+			Description(a.kind()+" · "+src+"\nRuns on the gateway against the selected cluster."),
+		huh.NewSelect[string]().Key("appctx").Title("Cluster context").
+			Options(huh.NewOptions(ctxs...)...).Value(&m.fAppCtx),
+		huh.NewInput().Key("appns").Title("Namespace").
+			Description("created if it does not exist").Value(&m.fAppNS),
+		huh.NewInput().Key("apprelease").Title("Deployment name").
+			Description("helm release name · deploy again with a different name to run a second copy").
+			Value(&m.fAppRelease),
+	)).WithWidth(formWidth(m)).WithShowHelp(true).WithTheme(huhTheme()).WithKeyMap(huhKM)
+	return m.form.Init()
+}
+
+// openAppRemove picks which installation of an app to uninstall.
+func (m *model) openAppRemove(name string, ds []appDeployment) tea.Cmd {
+	opts := make([]huh.Option[string], 0, len(ds))
+	for _, d := range ds {
+		label := d.label()
+		if d.Missing {
+			label += "  (not found at last refresh)"
+		}
+		opts = append(opts, huh.NewOption(label, d.label()))
+	}
+	m.fAppTarget = ds[0].label()
+	m.appEditingName = name
+	m.modal = modalAppRemove
+	m.form = huh.NewForm(huh.NewGroup(
+		huh.NewNote().Title("Remove "+name).
+			Description("This uninstalls the workload from the cluster. It is not just a listing."),
+		huh.NewSelect[string]().Key("apptarget").Title("Installation").
+			Options(opts...).Value(&m.fAppTarget),
+	)).WithWidth(formWidth(m)).WithShowHelp(true).WithTheme(huhTheme()).WithKeyMap(huhKM)
+	return m.form.Init()
+}
+
+// openAppAdd defines or edits a catalog entry. Leaving the chart fields empty
+// and filling the manifest URL (or the reverse) picks the deployment method.
+func (m *model) openAppAdd() tea.Cmd { return m.openAppEdit(k8sApp{}, "") }
+
+func (m *model) openAppEdit(a k8sApp, replacing string) tea.Cmd {
+	m.fAppName, m.fAppDesc = a.Name, a.Desc
+	m.fAppRepo, m.fAppChart = a.Repo, a.Chart
+	m.fAppVersion, m.fAppValues = a.Version, a.Values
+	m.fAppManifest, m.fAppNS = a.ManifestURL, a.defaultNamespace()
+	m.appEditingName = replacing
+
+	title := "Add application"
+	if replacing != "" {
+		title = "Edit " + replacing
+	}
+	m.modal = modalAppAdd
+	m.form = huh.NewForm(huh.NewGroup(
+		huh.NewNote().Title(title).
+			Description("Fill EITHER the Helm fields OR the manifest URL."),
+		huh.NewInput().Key("appname").Title("Name").Placeholder("e.g. Open WebUI").Value(&m.fAppName),
+		huh.NewInput().Key("appdesc").Title("Description").Value(&m.fAppDesc),
+		huh.NewInput().Key("apprepo").Title("Helm repository").
+			Description("blank for an oci:// chart").
+			Placeholder("https://charts.example.com").Value(&m.fAppRepo),
+		huh.NewInput().Key("appchart").Title("Chart").
+			Placeholder("my-chart  or  oci://ghcr.io/org/chart").Value(&m.fAppChart),
+		huh.NewInput().Key("appversion").Title("Chart version").
+			Description("optional · blank tracks the latest").Value(&m.fAppVersion),
+		huh.NewInput().Key("appvalues").Title("Helm values").
+			Description("optional · comma-separated key=value, passed as --set").
+			Placeholder("service.type=LoadBalancer,replicas=2").Value(&m.fAppValues),
+		huh.NewInput().Key("appmanifest").Title("Manifest URL").
+			Description("used instead of a chart · kubectl apply -f").Value(&m.fAppManifest),
+		huh.NewInput().Key("appns").Title("Default namespace").Value(&m.fAppNS),
+	)).WithWidth(formWidth(m)).WithShowHelp(true).WithTheme(huhTheme()).WithKeyMap(huhKM)
+	return m.form.Init()
+}
+
+// openK8sAdd imports a cluster into the gateway's kubeconfig.
+//
+// The MicroK8s path reuses the bastion flow that already backs the Nutanix
+// MicroK8s deployment, so a cluster AIDT provisioned is added by naming its
+// node rather than by moving a kubeconfig around by hand.
+func (m *model) openK8sAdd() tea.Cmd {
+	dcfg := withDeployDefaults(m.deployCfg)
+	m.fK8sSource = "microk8s"
+	m.fK8sCtxName, m.fK8sPath, m.fK8sNode = "", "", ""
+	m.fK8sNodeUser = orDefault(dcfg.VMUser, "rocky")
+	m.fK8sNodePass = dcfg.VMPassword
+
+	m.modal = modalK8sAdd
+	m.form = huh.NewForm(huh.NewGroup(
+		huh.NewNote().Title("Add a cluster").
+			Description("Merged into the gateway's ~/.kube/config (backed up first)."),
+		huh.NewSelect[string]().Key("k8ssource").Title("Source").
+			Options(
+				huh.NewOption("MicroK8s node (fetch over SSH)", "microk8s"),
+				huh.NewOption("kubeconfig file already on the gateway", "file"),
+			).Value(&m.fK8sSource),
+		huh.NewInput().Key("k8sctx").Title("Context name").
+			Description("what this cluster will be called · must be unique").
+			Placeholder("e.g. lab-microk8s").Value(&m.fK8sCtxName),
+		huh.NewInput().Key("k8snode").Title("MicroK8s node address").
+			Description("MicroK8s source only").Placeholder("10.42.156.60").Value(&m.fK8sNode),
+		huh.NewInput().Key("k8suser").Title("Node SSH user").Value(&m.fK8sNodeUser),
+		huh.NewInput().Key("k8spass").Title("Node SSH password").Password(true).Value(&m.fK8sNodePass),
+		huh.NewInput().Key("k8spath").Title("Kubeconfig path on the gateway").
+			Description("file source only").Placeholder("/home/rocky/incoming.kubeconfig").Value(&m.fK8sPath),
+	)).WithWidth(formWidth(m)).WithShowHelp(true).WithTheme(huhTheme()).WithKeyMap(huhKM)
+	return m.form.Init()
+}
+
+// currentK8sContext returns the gateway's active context, if known.
+func (m *model) currentK8sContext() string {
+	for _, c := range m.k8sContexts {
+		if c.Current {
+			return c.Name
+		}
+	}
+	return ""
+}
+
 // onFormComplete dispatches the action for the just-submitted modal.
 func (m *model) onFormComplete() tea.Cmd {
 	switch m.modal {
@@ -893,6 +1033,113 @@ func (m *model) onFormComplete() tea.Cmd {
 		m.pendingCustom = nil
 		m.notice = "selected worker is no longer available — refresh Pool and retry"
 		return nil
+
+	case modalAppDeploy:
+		a, ok := m.appByName(m.appEditingName)
+		m.appEditingName = ""
+		if !ok {
+			m.notice = "application no longer in the catalog"
+			return nil
+		}
+		ctx := orDefault(m.fstr("appctx"), m.fAppCtx)
+		ns := orDefault(m.fstr("appns"), m.fAppNS)
+		rel := orDefault(m.fstr("apprelease"), m.fAppRelease)
+		if ctx == "" || ns == "" || rel == "" {
+			m.notice = "context, namespace and deployment name are all required"
+			return nil
+		}
+		return m.startAppDeploy(a, appDeployment{
+			App: a.Name, Context: ctx, Namespace: ns,
+			Release: rel, Kind: a.kind(),
+		})
+
+	case modalAppRemove:
+		name := m.appEditingName
+		m.appEditingName = ""
+		a, ok := m.appByName(name)
+		if !ok {
+			// The definition can be gone while installs remain; removal only
+			// needs the manifest URL, and helm releases don't need it at all.
+			a = k8sApp{Name: name}
+		}
+		target := orDefault(m.fstr("apptarget"), m.fAppTarget)
+		for _, d := range m.appDeploymentsFor(name) {
+			if d.label() == target {
+				return m.startAppRemove(a, d)
+			}
+		}
+		m.notice = "that installation is no longer recorded"
+		return nil
+
+	case modalAppAdd:
+		replacing := m.appEditingName
+		m.appEditingName = ""
+		name := strings.TrimSpace(orDefault(m.fstr("appname"), m.fAppName))
+		if name == "" {
+			m.notice = "an application name is required"
+			return nil
+		}
+		a := k8sApp{
+			Name:        name,
+			Desc:        strings.TrimSpace(orDefault(m.fstr("appdesc"), m.fAppDesc)),
+			Repo:        strings.TrimSpace(orDefault(m.fstr("apprepo"), m.fAppRepo)),
+			Chart:       strings.TrimSpace(orDefault(m.fstr("appchart"), m.fAppChart)),
+			Version:     strings.TrimSpace(orDefault(m.fstr("appversion"), m.fAppVersion)),
+			Values:      strings.TrimSpace(orDefault(m.fstr("appvalues"), m.fAppValues)),
+			ManifestURL: strings.TrimSpace(orDefault(m.fstr("appmanifest"), m.fAppManifest)),
+			Namespace:   strings.TrimSpace(orDefault(m.fstr("appns"), m.fAppNS)),
+		}
+		if a.kind() == "" {
+			m.notice = "give either a chart or a manifest URL"
+			return nil
+		}
+		m.upsertApp(a, replacing)
+		m.notice = "saved application: " + name
+		return nil
+
+	case modalK8sAdd:
+		ctx := slugifyName(orDefault(m.fstr("k8sctx"), m.fK8sCtxName))
+		if ctx == "" {
+			m.notice = "a context name is required"
+			return nil
+		}
+		if containsStr(m.k8sContextNames(), ctx) {
+			m.notice = "context " + ctx + " already exists — remove it first or pick another name"
+			return nil
+		}
+		switch orDefault(m.fstr("k8ssource"), m.fK8sSource) {
+		case "file":
+			path := strings.TrimSpace(orDefault(m.fstr("k8spath"), m.fK8sPath))
+			if path == "" {
+				m.notice = "a kubeconfig path on the gateway is required"
+				return nil
+			}
+			return m.runK8sScript(importKubeconfigScript(path, ctx), "import cluster "+ctx)
+		default:
+			node := strings.TrimSpace(orDefault(m.fstr("k8snode"), m.fK8sNode))
+			if node == "" {
+				m.notice = "the MicroK8s node address is required"
+				return nil
+			}
+			gw := hostFromURL(m.gateway)
+			if gw == "" {
+				m.notice = "no gateway configured"
+				return nil
+			}
+			m.notice = "fetching kubeconfig from " + node + " …"
+			// The bastion flow fetches, retargets, and merges in one command,
+			// which is exactly what adding a MicroK8s cluster by hand would do.
+			return bastionSetupCmd(bastionTargets{
+				node:        node,
+				nodeUser:    orDefault(m.fstr("k8suser"), orDefault(m.fK8sNodeUser, "rocky")),
+				nodePass:    orDefault(m.fsecret("k8spass"), m.fK8sNodePass),
+				gateway:     gw,
+				gatewayUser: orDefault(m.sshUser, "rocky"),
+				gatewayPass: m.sshPass,
+				context:     ctx,
+				server:      "https://" + node + ":16443",
+			})
+		}
 	}
 	return nil
 }

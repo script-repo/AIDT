@@ -43,6 +43,16 @@ type keyMap struct {
 	ServiceOpen   key.Binding
 	ServiceForget key.Binding
 
+	AppDeploy  key.Binding
+	AppRemove  key.Binding
+	AppAdd     key.Binding
+	AppEdit    key.Binding
+	AppForget  key.Binding
+	K8sUse     key.Binding
+	K8sAdd     key.Binding
+	K8sRemove  key.Binding
+	K8sRefresh key.Binding
+
 	Send       key.Binding
 	NewSession key.Binding
 
@@ -85,9 +95,20 @@ func newKeyMap() keyMap {
 		// Distinct from Delete ("delete VM"): this only forgets a listing, it
 		// never touches the workload the listing points at.
 		ServiceForget: key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "remove listing")),
-		Send:          key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "send")),
-		NewSession:    key.NewBinding(key.WithKeys("ctrl+n"), key.WithHelp("ctrl+n", "new session")),
-		Help:          key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
-		Quit:          key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
+		AppDeploy:     key.NewBinding(key.WithKeys("d", "enter"), key.WithHelp("d", "deploy app")),
+		// Unlike ServiceForget, this really uninstalls the workload — the same
+		// meaning x carries in the Agents section.
+		AppRemove:  key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "remove from cluster")),
+		AppAdd:     key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "add app")),
+		AppEdit:    key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit app")),
+		AppForget:  key.NewBinding(key.WithKeys("X"), key.WithHelp("X", "drop from catalog")),
+		K8sUse:     key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "set current")),
+		K8sAdd:     key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "add cluster")),
+		K8sRemove:  key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "remove entry")),
+		K8sRefresh: key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
+		Send:       key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "send")),
+		NewSession: key.NewBinding(key.WithKeys("ctrl+n"), key.WithHelp("ctrl+n", "new session")),
+		Help:       key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
+		Quit:       key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
 	}
 }

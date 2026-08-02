@@ -34,6 +34,11 @@ const (
 	secServices
 	secAccess
 	secUpdate
+	// App Deploy and K8S are appended rather than grouped next to Nutanix so the
+	// ten sections that predate them keep the number shortcuts operators already
+	// know (see the quick-jump handler in update.go).
+	secApps
+	secK8s
 )
 
 type sectionInfo struct {
@@ -52,7 +57,13 @@ var sections = []sectionInfo{
 	{"Services", "direct service URLs"},
 	{"Access", "base URL & token"},
 	{"Update", "maintenance & upgrades"},
+	{"App Deploy", "apps on kubernetes"},
+	{"K8S", "kubeconfig clusters"},
 }
+
+// numberedSections is how many sections the 1-9/0 quick-jump can reach. There
+// are only ten keys, so anything past this is reached from the sidebar.
+const numberedSections = 10
 
 // focus zone: are we navigating the sidebar, or interacting with the content?
 type zone int
@@ -81,6 +92,10 @@ const (
 	modalCustomDeploy
 	modalCustomWorker
 	modalAgentRemove
+	modalAppDeploy
+	modalAppRemove
+	modalAppAdd
+	modalK8sAdd
 )
 
 type chatRole int
@@ -160,10 +175,28 @@ type model struct {
 	updateList   list.Model
 	customList   list.Model // user-defined custom deployment types (Nutanix submenu)
 
+	appsList list.Model // App Deploy catalog
+	k8sList  list.Model // clusters from the gateway's kubeconfig
+
 	// custom deployment types (Nutanix submenu)
 	customDeploys []customDeploy
 	services      []serviceLink
 	nutanixCustom bool // Nutanix section is showing the custom-deploy submenu
+
+	// App Deploy: the catalog, the seed ledger, and what is installed where.
+	apps       []k8sApp
+	appsSeeded []string
+	appDeploys []appDeployment
+	// pendingApp is the installation a running deploy/remove will record or
+	// forget when it finishes. Registry writes happen on success only, so a
+	// failed deploy never leaves the list claiming the app is there.
+	pendingApp     *appDeployment
+	pendingAppAct  string // "deploy" | "remove"
+	appBusy        bool
+	k8sContexts    []k8sContext
+	k8sErr         string // last kubeconfig read failure, shown in the K8S view
+	k8sLoading     bool
+	appEditingName string // catalog entry being edited ("" = adding a new one)
 
 	// custom-deploy access link: pendingCustom tracks an in-flight setup. Its
 	// service URL is persisted only after the setup exits successfully.
@@ -288,6 +321,25 @@ type model struct {
 	fCustPort   string
 	fCustPath   string
 	fCustHost   string
+	// App Deploy form values
+	fAppCtx      string
+	fAppNS       string
+	fAppRelease  string
+	fAppTarget   string // selected installation, for removal
+	fAppName     string
+	fAppDesc     string
+	fAppRepo     string
+	fAppChart    string
+	fAppVersion  string
+	fAppValues   string
+	fAppManifest string
+	// K8S form values
+	fK8sSource   string // "microk8s" | "file"
+	fK8sPath     string
+	fK8sCtxName  string
+	fK8sNode     string
+	fK8sNodeUser string
+	fK8sNodePass string
 
 	// hermes gateway / telegram config (persisted)
 	hermesCfg hermesSettings
@@ -359,6 +411,12 @@ func newModel(gateway, sshUser, sshPass string) model {
 		vmImages = map[string]string{}
 	}
 
+	// Seed the App Deploy catalog on the same contract as the custom deploys: a
+	// config that predates the catalog counts as already offered, so an operator
+	// who curates the list does not get the built-ins back on every upgrade.
+	appsLegacySeeded := len(st.Apps) > 0 && len(st.AppsSeeded) == 0
+	apps, appsSeeded, appsChanged := seedBuiltinApps(st.Apps, st.AppsSeeded, appsLegacySeeded)
+
 	// Connection details come from flags/env first, then the values captured on
 	// a previous launch (first-run setup), then the built-in user fallback.
 	gateway = orDefault(gateway, st.Gateway)
@@ -397,6 +455,8 @@ func newModel(gateway, sshUser, sshPass string) model {
 		servicesList:  mkList("Services"),
 		updateList:    mkList("Update"),
 		customList:    mkList("Custom deployments"),
+		appsList:      mkList("App Deploy"),
+		k8sList:       mkList("K8S"),
 		chatVP:        viewport.New(80, 16),
 		logVP:         viewport.New(80, 8),
 		composer:      ta,
@@ -413,9 +473,15 @@ func newModel(gateway, sshUser, sshPass string) model {
 		services:      st.Services,
 		vmImages:      vmImages,
 		imageByID:     map[string]string{},
+		apps:          apps,
+		appsSeeded:    appsSeeded,
+		appDeploys:    st.AppDeploys,
 	}
 	if seedCustom || migrateCustom || addedBuiltin {
 		_ = saveCustomDeploys(tokFile, customDeploys, seededBuiltins)
+	}
+	if appsChanged {
+		_ = saveApps(tokFile, apps, appsSeeded)
 	}
 	if m.agentReg == nil {
 		m.agentReg = map[string]string{}
@@ -450,10 +516,17 @@ func newModel(gateway, sshUser, sshPass string) model {
 	m.updateList.SetDelegate(compact)
 	m.customList.SetDelegate(compact)
 
+	// App Deploy and K8S colour their rows by state, which the default delegate
+	// cannot express (see stateDelegate).
+	m.appsList.SetDelegate(stateDelegate{})
+	m.k8sList.SetDelegate(stateDelegate{})
+
 	m.refreshAgents()
 	m.refreshUpdateList()
 	m.refreshCustomList()
 	m.refreshServices()
+	m.refreshAppsList()
+	m.refreshK8sList()
 	return m
 }
 
