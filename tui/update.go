@@ -115,6 +115,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		wasDown := !m.connected
 		m.connected = true
 		m.applyStatus(msg.st)
+		m.syncManagedVMs()
 		if wasDown {
 			// A poll succeeded after an outage (e.g. Olla finished restarting):
 			// restore the banner and refresh models/endpoints we may have missed.
@@ -203,6 +204,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err == nil {
 			m.endpoints = msg.eps
 			m.refreshServices()
+			// A worker the operator named freely is only recognisable as managed
+			// once it appears in the pool, so re-evaluate the Nutanix list here.
+			m.syncManagedVMs()
 			return m, m.modelsRefresh()
 		}
 		m.notice = "read endpoints failed: " + msg.err.Error()
@@ -1878,17 +1882,77 @@ func (m *model) refreshModels() {
 	m.modelsList.SetItems(items)
 }
 
+// managedHostRoles maps the address of every host AIDT actually manages to its
+// role: the gateway, plus every worker registered in the Olla pool.
+//
+// vmRole can only guess from the VM name ("worker", "ollama-", …), so a VM the
+// operator named freely is invisible to the Nutanix list even while it serves
+// traffic and shows up under Load. Pool membership is the authoritative signal,
+// so consult it before falling back to naming conventions.
+func (m *model) managedHostRoles() map[string]string {
+	out := map[string]string{}
+	mark := func(rawURL, role string) {
+		if h := hostFromURL(rawURL); h != "" {
+			out[h] = role
+		}
+	}
+	// Endpoints read from olla.yaml, and the gateway's live status (which is
+	// populated on connect, before any SSH read has happened).
+	for _, e := range m.endpoints {
+		mark(e.URL, "worker")
+	}
+	for _, e := range m.status.Endpoints {
+		mark(e.URL, "worker")
+	}
+	// Last so a combined gateway/worker box is labelled by its primary role.
+	mark(m.gateway, "gateway")
+	return out
+}
+
+// managedSignature is a stable fingerprint of the managed-host set, used to
+// rebuild the Nutanix list only when pool membership actually changes. Status
+// polls land every couple of seconds, and rebuilding the list on each one would
+// disturb the operator's selection and any active filter.
+func managedSignature(roles map[string]string) string {
+	keys := make([]string, 0, len(roles))
+	for h := range roles {
+		keys = append(keys, h+"="+roles[h])
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, ",")
+}
+
+// syncManagedVMs rebuilds the Nutanix list if the pool membership changed since
+// it was last rendered. Endpoints and gateway status arrive on their own
+// schedules, independently of the Prism inventory that populates the list.
+func (m *model) syncManagedVMs() {
+	if sig := managedSignature(m.managedHostRoles()); sig != m.managedSig {
+		m.refreshVMs()
+	}
+}
+
 func (m *model) refreshVMs() {
 	prefixes := m.customVMPrefixes()
+	managed := m.managedHostRoles()
+	m.managedSig = managedSignature(managed)
 	items := make([]list.Item, 0, len(m.vms))
 	for _, v := range m.vms {
 		role := v.Role
 		if role != "gateway" && role != "worker" {
+			// A VM registered in the pool is managed whatever it is called.
+			// pc.go reports an unknown address as "-", which must never match.
+			poolRole, inPool := "", false
+			if v.IP != "" && v.IP != "-" {
+				poolRole, inPool = managed[v.IP]
+			}
+			switch {
+			case inPool:
+				role = poolRole
 			// Surface user-defined custom-deploy VMs as managed too; skip every
 			// other unrelated VM in Prism Central.
-			if matchesCustomPrefix(v.Name, prefixes) {
+			case matchesCustomPrefix(v.Name, prefixes):
 				role = "custom"
-			} else {
+			default:
 				continue
 			}
 		}

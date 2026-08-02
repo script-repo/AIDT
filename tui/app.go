@@ -128,6 +128,10 @@ type model struct {
 	images    []string        // PC disk images available to clone
 	subnets   []string        // PC subnets available for placement
 	endpoints []endpointEntry // cached gateway endpoints (for direct worker ops/console)
+	// managedSig fingerprints the gateway+worker host set the Nutanix list was
+	// last built from, so it is rebuilt on membership changes but not on every
+	// status poll.
+	managedSig string
 
 	// derived metrics
 	prevReq    int
