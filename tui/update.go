@@ -1506,8 +1506,11 @@ func (m *model) deleteSelectedVM() tea.Cmd {
 		}
 	}
 	m.pendingDeleteHosts = nil
+	m.pendingDeleteVMs = []string{it.name}
 	addDeleteHost := func(host string) {
-		if host != "" && !containsStr(m.pendingDeleteHosts, host) {
+		// pc.go reports an unknown address as "-", which must never be treated
+		// as a host or it would match nothing while looking like a real entry.
+		if host != "" && host != "-" && !containsStr(m.pendingDeleteHosts, host) {
 			m.pendingDeleteHosts = append(m.pendingDeleteHosts, host)
 		}
 	}
@@ -1804,7 +1807,9 @@ func (m model) handleProc(ev ProcEvent) (tea.Model, tea.Cmd) {
 		wasLocalOlla := m.localOllaPending
 		m.localOllaPending = false
 		deleteHosts := m.pendingDeleteHosts
+		deleteVMs := m.pendingDeleteVMs
 		m.pendingDeleteHosts = nil
+		m.pendingDeleteVMs = nil
 		if ev.Code == 0 {
 			m.logLines = append(m.logLines, "<<< done")
 			if custom != nil && custom.url != "" {
@@ -1832,8 +1837,22 @@ func (m model) handleProc(ev ProcEvent) (tea.Model, tea.Cmd) {
 					m.notice = custom.cfg.Name + " deployed — configuring bastion access…"
 				}
 			}
-			if forgotten := m.forgetAgentHost(deleteHosts...); len(forgotten) > 0 {
-				m.notice = fmt.Sprintf("VM deleted; deregistered %d agent(s): %s", len(forgotten), strings.Join(forgotten, ", "))
+			// A deleted VM leaves nothing behind: its agent registrations and the
+			// services it hosted both go with it.
+			forgotten := m.forgetAgentHost(deleteHosts...)
+			droppedServices := m.forgetServices(deleteHosts, deleteVMs)
+			var cleaned []string
+			if len(forgotten) > 0 {
+				cleaned = append(cleaned, fmt.Sprintf("%d agent(s): %s", len(forgotten), strings.Join(forgotten, ", ")))
+			}
+			if len(droppedServices) > 0 {
+				cleaned = append(cleaned, fmt.Sprintf("%d service(s): %s", len(droppedServices), strings.Join(droppedServices, ", ")))
+				for _, s := range droppedServices {
+					m.logLines = append(m.logLines, "removed service  "+s)
+				}
+			}
+			if len(cleaned) > 0 {
+				m.notice = "VM deleted; deregistered " + strings.Join(cleaned, " and ")
 			}
 		} else {
 			m.logLines = append(m.logLines, fmt.Sprintf("<<< failed (rc=%d)", ev.Code))

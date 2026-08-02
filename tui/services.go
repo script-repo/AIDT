@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -133,6 +134,60 @@ func (m *model) recordCustomService(run customRun) {
 	m.lastCustomName = run.cfg.Name + " on " + run.target
 	m.lastCustomAccess = run.url
 	m.refreshServices()
+}
+
+// forgetServices drops persisted custom services that belonged to a deleted VM
+// and reports what it removed.
+//
+// Only custom services need this. Gateway, Ollama worker, and agent-server rows
+// are derived live from the pool and the agent registry, so they stop being
+// rendered as soon as the endpoint or registration goes away; the entries in
+// tui.json are the only ones that would otherwise outlive their host.
+//
+// Matching is by address or by name because the two deploy paths record
+// different targets: installing onto a freshly provisioned VM records the VM
+// name, while installing onto an existing worker records that worker's endpoint
+// name.
+func (m *model) forgetServices(hosts, names []string) []string {
+	byHost := map[string]bool{}
+	for _, h := range hosts {
+		if h != "" && h != "-" {
+			byHost[h] = true
+		}
+	}
+	byName := map[string]bool{}
+	for _, n := range names {
+		if n != "" {
+			byName[n] = true
+		}
+	}
+	if len(byHost) == 0 && len(byName) == 0 {
+		return nil
+	}
+
+	kept := make([]serviceLink, 0, len(m.services))
+	var dropped []string
+	for _, s := range m.services {
+		if byHost[hostFromURL(s.URL)] || byName[s.Target] {
+			dropped = append(dropped, s.Name+" on "+s.Target)
+			continue
+		}
+		kept = append(kept, s)
+	}
+	if len(dropped) == 0 {
+		return nil
+	}
+	m.services = kept
+	// The Nutanix view keeps the most recent deploy as a clickable link, and
+	// "b" opens it. Pointing that at a VM that no longer exists is worse than
+	// showing nothing.
+	if byHost[hostFromURL(m.lastCustomAccess)] {
+		m.lastCustomAccess, m.lastCustomName = "", ""
+	}
+	sort.Strings(dropped)
+	_ = saveServices(m.tokFile, m.services)
+	m.refreshServices()
+	return dropped
 }
 
 const maxWorkerServicePort = 8543

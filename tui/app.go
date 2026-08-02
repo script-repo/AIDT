@@ -218,11 +218,15 @@ type model struct {
 	// proc (deploy/delete)
 	procCh             chan ProcEvent
 	procBusy           bool
-	localOllaPending   bool        // the running proc is a local Olla install; connect on success
-	pendingDeleteHosts []string    // clear these host aliases after successful VM deletion
-	probingLocal       bool        // startup probe for a local Olla is in flight; hold off the Connect form
-	batch              deployBatch // active multi-worker parallel deploy, if any
-	logLines           []string
+	localOllaPending   bool     // the running proc is a local Olla install; connect on success
+	pendingDeleteHosts []string // clear these host aliases after successful VM deletion
+	// pendingDeleteVMs holds the names of the VMs being deleted. Custom services
+	// deployed onto a new VM are recorded against its name, not its address, so
+	// the address list alone cannot find them.
+	pendingDeleteVMs []string
+	probingLocal     bool        // startup probe for a local Olla is in flight; hold off the Connect form
+	batch            deployBatch // active multi-worker parallel deploy, if any
+	logLines         []string
 
 	// access
 	token   string
