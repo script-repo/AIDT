@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -125,7 +126,7 @@ func TestCommandAtlasInstallerIsValidShell(t *testing.T) {
 // alone; getting that backwards produces a config nginx cannot parse.
 func TestCommandAtlasNginxTemplateEscaping(t *testing.T) {
 	s := atlasInstaller(t)
-	start := strings.Index(s, `$SUDO tee "$SITE" >/dev/null <<NGINXEOF`)
+	start := strings.Index(s, `tee "$SITE" >/dev/null <<NGINXEOF`)
 	end := strings.Index(s, "\nNGINXEOF\n")
 	if start < 0 || end < start {
 		t.Fatal("could not locate the nginx heredoc")
@@ -145,6 +146,45 @@ func TestCommandAtlasNginxTemplateEscaping(t *testing.T) {
 		if strings.Contains(tmpl, `\`+v) {
 			t.Errorf("shell value %s is escaped and would not be substituted", v)
 		}
+	}
+}
+
+// AIDT runs custom installers as root, so a "SUDO" variable that is empty in
+// that case silently drops its own flags: `$SUDO -E bash -` becomes `-E bash -`
+// and dies with exit 127. Any installer combining the variable with a
+// sudo-specific flag has this bug, so none may.
+func TestNoInstallerCombinesSudoVariableWithFlags(t *testing.T) {
+	pattern := regexp.MustCompile(`\$\{?SUDO\}? +-[a-zA-Z]`)
+	roots := []string{"..", filepath.Join("..", "scripts"), filepath.Join("..", "scripts", "remote")}
+	checked := 0
+	for _, dir := range roots {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".sh") {
+				continue
+			}
+			body, err := os.ReadFile(filepath.Join(dir, e.Name()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			checked++
+			for i, line := range strings.Split(string(body), "\n") {
+				trimmed := strings.TrimSpace(line)
+				if strings.HasPrefix(trimmed, "#") {
+					continue // prose about the bug is fine
+				}
+				if pattern.MatchString(line) {
+					t.Errorf("%s:%d combines $SUDO with a flag, which breaks when already root:\n  %s",
+						e.Name(), i+1, trimmed)
+				}
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no installer scripts were checked")
 	}
 }
 

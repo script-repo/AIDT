@@ -34,12 +34,36 @@ die() {
 [ -r /etc/os-release ] || die "cannot read /etc/os-release"
 . /etc/os-release
 
+# Privilege helpers rather than a "$SUDO" string. AIDT runs custom installers as
+# root, which made an empty $SUDO turn "$SUDO -E bash" into "-E bash" and fail
+# with exit 127; a function cannot lose its flags that way.
 if [ "$(id -u)" -eq 0 ]; then
-	SUDO=""
 	RUN_AS="${SUDO_USER:-root}"
+	run_root() { "$@"; }
+	run_root_env() { "$@"; } # already root: the environment is ours
+	run_as_user() {
+		_u="$1"
+		shift
+		if [ "$_u" = "root" ]; then
+			"$@"
+		elif command -v runuser >/dev/null 2>&1; then
+			runuser -u "$_u" -- "$@"
+		elif command -v sudo >/dev/null 2>&1; then
+			sudo -n -u "$_u" -- "$@"
+		else
+			die "cannot drop privileges to $_u (need runuser or sudo)"
+		fi
+	}
 elif command -v sudo >/dev/null 2>&1; then
-	SUDO="sudo -n"
+	sudo -n true 2>/dev/null || die "passwordless sudo is required"
 	RUN_AS="$(id -un)"
+	run_root() { sudo -n "$@"; }
+	run_root_env() { sudo -n -E "$@"; }
+	run_as_user() {
+		_u="$1"
+		shift
+		if [ "$_u" = "$(id -un)" ]; then "$@"; else sudo -n -u "$_u" -- "$@"; fi
+	}
 else
 	die "root or passwordless sudo is required"
 fi
@@ -62,15 +86,15 @@ fi
 # installed we stop, rather than quietly publishing an unauthenticated shell.
 log "installing dependencies…"
 if [ "$FAMILY" = debian ]; then
-	$SUDO apt-get update -y >/dev/null
-	$SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y \
+	run_root apt-get update -y >/dev/null
+	run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y \
 		git curl ca-certificates build-essential python3 openssl \
 		nginx libnginx-mod-http-auth-pam libpam-modules >/dev/null
 	NGINX_USER=www-data
 	SHADOW_GROUP=shadow
 else
-	$SUDO dnf install -y epel-release >/dev/null 2>&1 || true
-	$SUDO dnf install -y \
+	run_root dnf install -y epel-release >/dev/null 2>&1 || true
+	run_root dnf install -y \
 		git curl ca-certificates gcc-c++ make python3 openssl \
 		nginx nginx-mod-http-auth-pam pam >/dev/null ||
 		die "could not install nginx with the PAM auth module (EPEL provides nginx-mod-http-auth-pam)"
@@ -87,11 +111,11 @@ fi
 if [ "$NODE_OK" -ne 1 ]; then
 	log "installing Node.js 22…"
 	if [ "$FAMILY" = debian ]; then
-		curl -fsSL https://deb.nodesource.com/setup_22.x | $SUDO -E bash - >/dev/null
-		$SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs >/dev/null
+		curl -fsSL https://deb.nodesource.com/setup_22.x | run_root_env bash - >/dev/null
+		run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs >/dev/null
 	else
-		curl -fsSL https://rpm.nodesource.com/setup_22.x | $SUDO -E bash - >/dev/null
-		$SUDO dnf install -y nodejs >/dev/null
+		curl -fsSL https://rpm.nodesource.com/setup_22.x | run_root_env bash - >/dev/null
+		run_root dnf install -y nodejs >/dev/null
 	fi
 fi
 command -v node >/dev/null 2>&1 || die "node is missing after installation"
@@ -100,40 +124,40 @@ log "node $(node --version)"
 # --- application --------------------------------------------------------------
 log "fetching Command Atlas from script-repo/showcase (${ATLAS_REF})…"
 if [ -d "$INSTALL_DIR/.git" ]; then
-	$SUDO git -C "$INSTALL_DIR" fetch --depth 1 origin "$ATLAS_REF" >/dev/null
-	$SUDO git -C "$INSTALL_DIR" reset --hard "origin/$ATLAS_REF" >/dev/null
+	run_root git -C "$INSTALL_DIR" fetch --depth 1 origin "$ATLAS_REF" >/dev/null
+	run_root git -C "$INSTALL_DIR" reset --hard "origin/$ATLAS_REF" >/dev/null
 else
-	$SUDO rm -rf "$INSTALL_DIR"
-	$SUDO git clone --depth 1 --branch "$ATLAS_REF" "$REPO_URL" "$INSTALL_DIR" >/dev/null
+	run_root rm -rf "$INSTALL_DIR"
+	run_root git clone --depth 1 --branch "$ATLAS_REF" "$REPO_URL" "$INSTALL_DIR" >/dev/null
 fi
 [ -f "$APP_DIR/server.js" ] || die "$APP_DIR/server.js not found in the repository"
-$SUDO chown -R "$ATLAS_USER" "$INSTALL_DIR"
+run_root chown -R "$ATLAS_USER" "$INSTALL_DIR"
 
 # node-pty ships a native addon; the committed node_modules was built elsewhere.
 log "installing node dependencies (node-pty compiles a native addon)…"
-$SUDO -u "$ATLAS_USER" env HOME="$(getent passwd "$ATLAS_USER" | cut -d: -f6)" \
+run_as_user "$ATLAS_USER" env HOME="$(getent passwd "$ATLAS_USER" | cut -d: -f6)" \
 	npm --prefix "$APP_DIR" install --no-audit --no-fund >/dev/null ||
 	die "npm install failed (build tools or network?)"
 
 # --- token --------------------------------------------------------------------
 # Pinned so the published URL keeps working across restarts. nginx injects it,
 # so it never appears in a link, a log line, or AIDT's saved settings.
-$SUDO mkdir -p "$(dirname "$ENV_FILE")"
-if $SUDO test -s "$ENV_FILE"; then
+run_root mkdir -p "$(dirname "$ENV_FILE")"
+if run_root test -s "$ENV_FILE"; then
 	log "reusing the existing token"
 else
 	log "generating an access token…"
 	printf 'ATLAS_TOKEN=%s\nPORT=%s\n' "$(openssl rand -hex 24)" "$APP_PORT" |
-		$SUDO tee "$ENV_FILE" >/dev/null
+		run_root tee "$ENV_FILE" >/dev/null
 fi
-$SUDO chmod 600 "$ENV_FILE"
-$SUDO chown "$ATLAS_USER" "$ENV_FILE"
-ATLAS_TOKEN="$($SUDO sed -n 's/^ATLAS_TOKEN=//p' "$ENV_FILE" | head -1)"
+run_root chmod 600 "$ENV_FILE"
+run_root chown "$ATLAS_USER" "$ENV_FILE"
+ATLAS_TOKEN="$(run_root sed -n 's/^ATLAS_TOKEN=//p' "$ENV_FILE" | head -1)"
 [ -n "$ATLAS_TOKEN" ] || die "could not read the access token"
 
 # --- service ------------------------------------------------------------------
 log "installing the command-atlas service…"
-$SUDO tee /etc/systemd/system/command-atlas.service >/dev/null <<UNIT
+run_root tee /etc/systemd/system/command-atlas.service >/dev/null <<UNIT
 [Unit]
 Description=Command Atlas terminal (loopback only; reached through nginx)
 After=network.target
@@ -150,51 +174,51 @@ RestartSec=3
 [Install]
 WantedBy=multi-user.target
 UNIT
-$SUDO systemctl daemon-reload
-$SUDO systemctl enable --now command-atlas >/dev/null
+run_root systemctl daemon-reload
+run_root systemctl enable --now command-atlas >/dev/null
 sleep 2
-$SUDO systemctl is-active --quiet command-atlas ||
+run_root systemctl is-active --quiet command-atlas ||
 	die "command-atlas failed to start (journalctl -u command-atlas)"
 
 # --- PAM ----------------------------------------------------------------------
 # nginx must be able to verify local passwords, which means reading the shadow
 # database through PAM's helper.
 log "configuring PAM authentication against local accounts…"
-$SUDO tee /etc/pam.d/command-atlas >/dev/null <<'PAMEOF'
+run_root tee /etc/pam.d/command-atlas >/dev/null <<'PAMEOF'
 auth    required pam_unix.so
 account required pam_unix.so
 PAMEOF
-$SUDO usermod -a -G "$SHADOW_GROUP" "$NGINX_USER" 2>/dev/null ||
+run_root usermod -a -G "$SHADOW_GROUP" "$NGINX_USER" 2>/dev/null ||
 	log "NOTE: could not add $NGINX_USER to $SHADOW_GROUP; PAM auth may fail"
 
 # --- TLS ----------------------------------------------------------------------
 # Self-signed, but the point is encryption: basic auth sends a real system
 # password on every request, and plain HTTP would put it on the wire in base64.
 CERT_DIR="/etc/command-atlas/tls"
-$SUDO mkdir -p "$CERT_DIR"
-if ! $SUDO test -s "$CERT_DIR/server.crt"; then
+run_root mkdir -p "$CERT_DIR"
+if ! run_root test -s "$CERT_DIR/server.crt"; then
 	log "generating a self-signed certificate…"
 	NODE_IP="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')"
 	[ -n "$NODE_IP" ] || NODE_IP="127.0.0.1"
-	$SUDO openssl req -x509 -newkey rsa:2048 -nodes -days 825 \
+	run_root openssl req -x509 -newkey rsa:2048 -nodes -days 825 \
 		-subj "/CN=$(hostname)" \
 		-addext "subjectAltName=DNS:$(hostname),IP:$NODE_IP,IP:127.0.0.1" \
 		-keyout "$CERT_DIR/server.key" -out "$CERT_DIR/server.crt" >/dev/null 2>&1 ||
 		die "certificate generation failed"
 fi
-$SUDO chmod 600 "$CERT_DIR/server.key"
-$SUDO chmod 644 "$CERT_DIR/server.crt"
+run_root chmod 600 "$CERT_DIR/server.key"
+run_root chmod 644 "$CERT_DIR/server.crt"
 
 # --- reverse proxy ------------------------------------------------------------
 log "configuring nginx on :${FRONT_PORT} (TLS + PAM basic auth)…"
 if [ "$FAMILY" = debian ]; then
 	SITE=/etc/nginx/sites-available/command-atlas.conf
-	$SUDO mkdir -p /etc/nginx/sites-enabled
+	run_root mkdir -p /etc/nginx/sites-enabled
 else
 	SITE=/etc/nginx/conf.d/command-atlas.conf
 fi
 
-$SUDO tee "$SITE" >/dev/null <<NGINXEOF
+run_root tee "$SITE" >/dev/null <<NGINXEOF
 # Sending "Connection: upgrade" on ordinary requests breaks keepalive, so switch
 # on whether the client actually asked to upgrade.
 map \$http_upgrade \$atlas_connection {
@@ -238,10 +262,10 @@ server {
 NGINXEOF
 # The file embeds the app token, so keep it off a world-readable path. Only the
 # nginx master reads the config, and it does so as root.
-$SUDO chmod 600 "$SITE"
+run_root chmod 600 "$SITE"
 if [ "$FAMILY" = debian ]; then
-	$SUDO ln -sf "$SITE" /etc/nginx/sites-enabled/command-atlas.conf
-	$SUDO rm -f /etc/nginx/sites-enabled/default
+	run_root ln -sf "$SITE" /etc/nginx/sites-enabled/command-atlas.conf
+	run_root rm -f /etc/nginx/sites-enabled/default
 fi
 # Both distributions' packages drop their own load_module snippet into a
 # directory nginx.conf already includes, so nothing is wired up by hand here. If
@@ -250,24 +274,24 @@ fi
 
 # SELinux: nginx may not connect to a local socket or read shadow by default.
 if command -v setsebool >/dev/null 2>&1; then
-	$SUDO setsebool -P httpd_can_network_connect 1 2>/dev/null || true
-	$SUDO setsebool -P nis_enabled 1 2>/dev/null || true
+	run_root setsebool -P httpd_can_network_connect 1 2>/dev/null || true
+	run_root setsebool -P nis_enabled 1 2>/dev/null || true
 fi
 
-$SUDO nginx -t >/dev/null 2>&1 || {
-	$SUDO nginx -t || true
+run_root nginx -t >/dev/null 2>&1 || {
+	run_root nginx -t || true
 	die "nginx rejected the generated configuration"
 }
-$SUDO systemctl enable nginx >/dev/null 2>&1 || true
-$SUDO systemctl restart nginx
-$SUDO systemctl is-active --quiet nginx || die "nginx failed to start"
+run_root systemctl enable nginx >/dev/null 2>&1 || true
+run_root systemctl restart nginx
+run_root systemctl is-active --quiet nginx || die "nginx failed to start"
 
 # --- firewall -----------------------------------------------------------------
-if command -v firewall-cmd >/dev/null 2>&1 && $SUDO firewall-cmd --state >/dev/null 2>&1; then
-	$SUDO firewall-cmd --permanent --add-port="${FRONT_PORT}/tcp" >/dev/null 2>&1 || true
-	$SUDO firewall-cmd --reload >/dev/null 2>&1 || true
-elif command -v ufw >/dev/null 2>&1 && $SUDO ufw status 2>/dev/null | grep -q '^Status: active'; then
-	$SUDO ufw allow "${FRONT_PORT}/tcp" >/dev/null 2>&1 || true
+if command -v firewall-cmd >/dev/null 2>&1 && run_root firewall-cmd --state >/dev/null 2>&1; then
+	run_root firewall-cmd --permanent --add-port="${FRONT_PORT}/tcp" >/dev/null 2>&1 || true
+	run_root firewall-cmd --reload >/dev/null 2>&1 || true
+elif command -v ufw >/dev/null 2>&1 && run_root ufw status 2>/dev/null | grep -q '^Status: active'; then
+	run_root ufw allow "${FRONT_PORT}/tcp" >/dev/null 2>&1 || true
 fi
 
 # --- report -------------------------------------------------------------------
