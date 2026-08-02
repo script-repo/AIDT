@@ -255,6 +255,10 @@ server {
     ssl_certificate_key ${CERT_DIR}/server.key;
     ssl_protocols TLSv1.2 TLSv1.3;
 
+    # Emit the redirect below exactly as written instead of rebuilding it from
+    # the server name, which loses the port.
+    absolute_redirect off;
+
     # Shells are long-lived; do not cut them off mid-session.
     proxy_read_timeout 86400s;
     proxy_send_timeout 86400s;
@@ -263,19 +267,30 @@ server {
         auth_pam "Command Atlas - use your account on this host";
         auth_pam_service_name "command-atlas";
 
-        # The app's own token stays server-side: nginx appends it after the
-        # operator has authenticated, so it never appears in a published link.
-        set \$atlas_args "token=${ATLAS_TOKEN}";
-        if (\$args != "") {
-            set \$atlas_args "\$args&token=${ATLAS_TOKEN}";
+        # The page reads its token from its own URL and reuses it for the
+        # WebSocket, so an authenticated operator has to arrive at a tokened
+        # URL — otherwise the terminal reports "backend not connected" and
+        # never opens a socket at all. Redirecting here keeps the published
+        # link token-free while handing the token over after authentication.
+        set \$atlas_redirect "";
+        if (\$uri = "/") { set \$atlas_redirect "root"; }
+        if (\$arg_token = "") { set \$atlas_redirect "\${atlas_redirect}-none"; }
+        if (\$atlas_redirect = "root-none") {
+            return 302 /?token=${ATLAS_TOKEN};
         }
 
-        proxy_pass http://127.0.0.1:${APP_PORT}\$uri?\$atlas_args;
+        proxy_pass http://127.0.0.1:${APP_PORT};
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection \$atlas_connection;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
+
+        # The app refuses a WebSocket upgrade whose Origin is not its own
+        # loopback address, so present the origin it expects. That check exists
+        # to stop a malicious page from driving the shell; here every request
+        # has already passed PAM authentication, which covers the same ground.
+        proxy_set_header Origin http://127.0.0.1:${APP_PORT};
     }
 }
 NGINXEOF

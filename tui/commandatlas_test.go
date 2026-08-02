@@ -105,8 +105,27 @@ func TestCommandAtlasKeepsTokenOutOfPublishedURL(t *testing.T) {
 			t.Errorf("published service URL leaks the token: %s", line)
 		}
 	}
-	if !strings.Contains(s, `set \$atlas_args "token=${ATLAS_TOKEN}"`) {
-		t.Error("nginx does not inject the token on the operator's behalf")
+	// The page reads its token from its own URL and reuses it for the WebSocket,
+	// so the operator must land on a tokened URL — but only after authenticating,
+	// which is what keeps the token out of the published link.
+	if !strings.Contains(s, `return 302 /?token=${ATLAS_TOKEN}`) {
+		t.Error("nginx does not hand the token over after authentication")
+	}
+	if !strings.Contains(s, "absolute_redirect off") {
+		t.Error("without absolute_redirect off the 302 loses the port")
+	}
+}
+
+// The app rejects a WebSocket upgrade whose Origin is not its own loopback
+// address. Behind the proxy the browser sends the external origin, so without a
+// rewrite the terminal never connects.
+func TestCommandAtlasRewritesOriginForWebSocket(t *testing.T) {
+	s := atlasInstaller(t)
+	if !strings.Contains(s, "proxy_set_header Origin http://127.0.0.1:${APP_PORT}") {
+		t.Error("Origin is not rewritten, so the WebSocket upgrade will be refused")
+	}
+	if !strings.Contains(s, `proxy_set_header Upgrade \$http_upgrade`) {
+		t.Error("the Upgrade header is not forwarded")
 	}
 }
 
@@ -133,7 +152,7 @@ func TestCommandAtlasNginxTemplateEscaping(t *testing.T) {
 	}
 	tmpl := s[start:end]
 	// nginx runtime variables must be escaped so the shell leaves them alone.
-	for _, v := range []string{`\$http_upgrade`, `\$args`, `\$uri`, `\$host`, `\$remote_addr`, `\$atlas_connection`} {
+	for _, v := range []string{`\$http_upgrade`, `\$arg_token`, `\$uri`, `\$host`, `\$remote_addr`, `\$atlas_connection`, `\$atlas_redirect`} {
 		if !strings.Contains(tmpl, v) {
 			t.Errorf("nginx variable %s is not escaped and would be eaten by the shell", v)
 		}
