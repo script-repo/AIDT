@@ -125,6 +125,8 @@ func (m model) sectionBody() string {
 		return m.viewNutanix()
 	case secApps:
 		return m.viewApps()
+	case secAppSvcs:
+		return m.viewAppServices()
 	case secK8s:
 		return m.viewK8s()
 	case secServices:
@@ -447,6 +449,45 @@ func (m model) viewApps() string {
 	)
 }
 
+// ---- section: app services -------------------------------------------------
+
+func (m model) viewAppServices() string {
+	rows := []string{
+		labelStyle.Render("App services") + dimStyle.Render("  (where deployed apps are reachable)"),
+		m.appSvcList.View(),
+	}
+
+	switch {
+	case hostFromURL(m.gateway) == "":
+		rows = append(rows, warnStyle.Render("No gateway connected — press c on the sidebar."))
+	case m.appSvcLoading:
+		rows = append(rows, dimStyle.Render(m.spin.View()+" asking the clusters what these apps expose…"))
+	case m.appSvcErr != "":
+		rows = append(rows, warnStyle.Render(m.appSvcErr))
+	case len(m.appDeploys) == 0:
+		rows = append(rows, dimStyle.Render("Nothing deployed yet. Install something from App Deploy and its\naddresses appear here automatically."))
+	case len(m.appServices) == 0:
+		rows = append(rows, dimStyle.Render("No addresses discovered. Press r to look again."))
+	default:
+		if sel, ok := m.selectedAppService(); ok && sel.url != "" {
+			rows = append(rows, labelStyle.Render("Direct URL")+"  "+goodStyle.Render(osc8(sel.url, sel.url)))
+		}
+		reachable := 0
+		for _, s := range m.appServices {
+			if s.reachable() {
+				reachable++
+			}
+		}
+		rows = append(rows, dimStyle.Render(fmt.Sprintf(
+			"%s from %s · addresses are read live, not remembered",
+			plural(reachable, "reachable address", "reachable addresses"),
+			plural(len(m.appDeploys), "installation", "installations"))))
+	}
+
+	rows = append(rows, dimStyle.Render("enter/b open URL · r refresh · / filter · esc back"))
+	return lipgloss.JoinVertical(lipgloss.Left, rows...)
+}
+
 // ---- section: k8s ----------------------------------------------------------
 
 func (m model) viewK8s() string {
@@ -631,6 +672,8 @@ func (m model) shortHelp() []key.Binding {
 		mid = []key.Binding{m.km.Open, m.km.Back}
 	case secApps:
 		mid = []key.Binding{m.km.AppDeploy, m.km.AppRemove, m.km.AppAdd, m.km.AppEdit, m.km.AppForget, m.km.Filter, m.km.Back}
+	case secAppSvcs:
+		mid = []key.Binding{m.km.ServiceOpen, m.km.K8sRefresh, m.km.Filter, m.km.Back}
 	case secK8s:
 		mid = []key.Binding{m.km.K8sUse, m.km.K8sAdd, m.km.K8sRemove, m.km.K8sRefresh, m.km.Filter, m.km.Back}
 	default:

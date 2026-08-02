@@ -126,6 +126,7 @@ keep the shortcuts they have always had.
 | Access | Show client endpoint values, model selection, and example requests. |
 | Update | Update AIDT, guests, Olla, Ollama, agents, images, and Ollama cloud keys. |
 | App Deploy | Install Helm charts and manifests onto the clusters listed in K8S. Deployed apps are coloured differently from undeployed ones. |
+| App Services | Where deployed apps are reachable: LoadBalancer, NodePort, and Ingress addresses, with a clickable URL. |
 | K8S | List, add, and remove the Kubernetes clusters in the gateway's kubeconfig. |
 
 Common keys:
@@ -429,6 +430,45 @@ one sticks. Bitnami charts are deliberately absent: the public Bitnami image
 catalog was withdrawn in 2025 and those charts install but cannot pull their
 images, so PostgreSQL is served by CloudNativePG and Redis by the
 ot-container-kit operator.
+
+### App Services
+
+App Deploy says an application is installed; App Services says where it can be
+reached. It is the Kubernetes counterpart to [Services](#tui-sections), which
+covers the gateway, the Ollama workers, and VM-based custom deployments.
+
+For every recorded installation, AIDT asks the cluster what it exposes and turns
+that into an address:
+
+| Service type | Result |
+| --- | --- |
+| `LoadBalancer` | `http(s)://<external-ip>:<port>` — one row per published port. A LoadBalancer with no address yet is reported as pending rather than shown blank. |
+| `NodePort` | `http(s)://<node-ip>:<nodePort>`, using the cluster's own node address. |
+| `Ingress` | `http(s)://<host><path>`, https when the rule carries TLS. |
+| `ClusterIP` | No URL — the row gives the `kubectl port-forward` command that does reach it. |
+
+Ports 443, 8443, and 9443 are rendered as `https`; everything else as `http`.
+`Enter` or `b` opens the highlighted URL, `r` refreshes, `/` filters. The list
+also refreshes when you open the section and immediately after a successful
+deploy, so a new app's address is there without hunting through the deploy log.
+
+Nothing here is persisted. A LoadBalancer IP can change and an Ingress host can
+be re-pointed, so a remembered URL would eventually send you somewhere wrong —
+the addresses are read from the cluster every time.
+
+An installation that exposes nothing still appears, marked as such. That is a
+real answer: a chart installed with its default `ClusterIP` service is running
+but unreachable from outside the cluster, and saying so is more useful than
+omitting the row, which would read as "not deployed". If you want such an app
+published, redeploy it with a service type its chart exposes — for example
+`service.type=LoadBalancer` in the application's Helm values.
+
+Scoping is best-effort. A Helm release usually stamps
+`app.kubernetes.io/instance` on its objects, but that is a convention rather
+than a guarantee, so when the label matches nothing AIDT falls back to listing
+the namespace. In a namespace shared by two applications this can attribute a
+Service to both; the row names the object and namespace so it stays possible to
+tell which is which.
 
 ## Prism Configuration
 

@@ -207,6 +207,46 @@ func (i k8sItem) stateColor() lipgloss.Color {
 	}
 }
 
+// appServiceItem is a row in the App Services list: one address exposed by a
+// deployed application, or an explicit statement that it exposes none.
+type appServiceItem struct {
+	app       string
+	name      string
+	kind      string
+	context   string
+	namespace string
+	url       string
+	detail    string
+}
+
+func (i appServiceItem) Title() string {
+	if i.url == "" {
+		return "⬡ " + i.app
+	}
+	return "✓ " + i.app + "  " + i.url
+}
+
+func (i appServiceItem) Description() string {
+	where := i.context + "/" + i.namespace
+	if i.name != "" {
+		where += " · " + i.name
+	}
+	return fmt.Sprintf("%s · %s · %s", where, dashIf(i.kind), dashIf(i.detail))
+}
+
+func (i appServiceItem) FilterValue() string {
+	return i.app + " " + i.name + " " + i.url + " " + i.context + " " + i.namespace
+}
+
+// stateColor greens a row the operator can actually open and mutes one they
+// cannot, so a reachable address is findable at a glance.
+func (i appServiceItem) stateColor() lipgloss.Color {
+	if i.url == "" {
+		return colMuted
+	}
+	return colGreen
+}
+
 // coloredItem is a list row that picks its own colour from its state.
 type coloredItem interface {
 	list.Item

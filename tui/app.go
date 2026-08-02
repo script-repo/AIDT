@@ -38,6 +38,7 @@ const (
 	// ten sections that predate them keep the number shortcuts operators already
 	// know (see the quick-jump handler in update.go).
 	secApps
+	secAppSvcs
 	secK8s
 )
 
@@ -58,6 +59,7 @@ var sections = []sectionInfo{
 	{"Access", "base URL & token"},
 	{"Update", "maintenance & upgrades"},
 	{"App Deploy", "apps on kubernetes"},
+	{"App Services", "deployed app URLs"},
 	{"K8S", "kubeconfig clusters"},
 }
 
@@ -175,8 +177,9 @@ type model struct {
 	updateList   list.Model
 	customList   list.Model // user-defined custom deployment types (Nutanix submenu)
 
-	appsList list.Model // App Deploy catalog
-	k8sList  list.Model // clusters from the gateway's kubeconfig
+	appsList   list.Model // App Deploy catalog
+	appSvcList list.Model // reachable addresses of deployed apps
+	k8sList    list.Model // clusters from the gateway's kubeconfig
 
 	// custom deployment types (Nutanix submenu)
 	customDeploys []customDeploy
@@ -197,6 +200,13 @@ type model struct {
 	k8sErr         string // last kubeconfig read failure, shown in the K8S view
 	k8sLoading     bool
 	appEditingName string // catalog entry being edited ("" = adding a new one)
+
+	// App Services: where deployed apps are reachable. Derived from the cluster
+	// on refresh and never persisted — an external address is assigned by the
+	// cluster and a remembered one would eventually point somewhere wrong.
+	appServices   []appService
+	appSvcErr     string
+	appSvcLoading bool
 
 	// custom-deploy access link: pendingCustom tracks an in-flight setup. Its
 	// service URL is persisted only after the setup exits successfully.
@@ -456,6 +466,7 @@ func newModel(gateway, sshUser, sshPass string) model {
 		updateList:    mkList("Update"),
 		customList:    mkList("Custom deployments"),
 		appsList:      mkList("App Deploy"),
+		appSvcList:    mkList("App Services"),
 		k8sList:       mkList("K8S"),
 		chatVP:        viewport.New(80, 16),
 		logVP:         viewport.New(80, 8),
@@ -519,6 +530,7 @@ func newModel(gateway, sshUser, sshPass string) model {
 	// App Deploy and K8S colour their rows by state, which the default delegate
 	// cannot express (see stateDelegate).
 	m.appsList.SetDelegate(stateDelegate{})
+	m.appSvcList.SetDelegate(stateDelegate{})
 	m.k8sList.SetDelegate(stateDelegate{})
 
 	m.refreshAgents()

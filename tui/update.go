@@ -354,6 +354,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case appServicesMsg:
+		m.appSvcLoading = false
+		if msg.err != nil {
+			m.appSvcErr = msg.err.Error()
+		} else {
+			m.appSvcErr = ""
+			m.appServices = msg.services
+		}
+		m.refreshAppServicesList()
+		return m, nil
+
 	case appReconcileMsg:
 		if msg.err != nil {
 			m.notice = "could not check deployed apps: " + msg.err.Error()
@@ -454,6 +465,9 @@ func (m *model) applyLayout(w, h int) {
 	// App Deploy and K8S both stream a deploy log, so they share that layout too.
 	m.appsList.SetSize(m.contentW, vmsH)
 	m.k8sList.SetSize(m.contentW, vmsH)
+	// App Services is a pure listing with no Output pane, so it gets the full
+	// content height like Services does.
+	m.appSvcList.SetSize(m.contentW, listH)
 
 	m.composer.SetWidth(m.contentW)
 	chatH := maxInt(m.contentH-6, 3)
@@ -531,6 +545,8 @@ func (m *model) activeList() *list.Model {
 		return &m.agentsList
 	case secApps:
 		return &m.appsList
+	case secAppSvcs:
+		return &m.appSvcList
 	case secK8s:
 		return &m.k8sList
 	case secServices:
@@ -547,6 +563,11 @@ func (m *model) enterContent() tea.Cmd {
 		return m.composer.Focus()
 	}
 	m.composer.Blur()
+	// Addresses are read live and can change between visits, so opening the
+	// section refreshes rather than showing whatever was true last time.
+	if m.section == secAppSvcs && !m.appSvcLoading {
+		return m.refreshAppServicesCmd()
+	}
 	return nil
 }
 
@@ -810,6 +831,20 @@ func (m model) handleContentKey(msg tea.KeyMsg, k string) (tea.Model, tea.Cmd) {
 		}
 		nl, cmd := m.appsList.Update(msg)
 		m.appsList = nl
+		return m, cmd
+
+	case secAppSvcs:
+		switch k {
+		case "esc", "left", "h":
+			m.leaveContent()
+			return m, nil
+		case "enter", "b":
+			return m, m.openSelectedAppService()
+		case "r":
+			return m, m.refreshAppServicesCmd()
+		}
+		nl, cmd := m.appSvcList.Update(msg)
+		m.appSvcList = nl
 		return m, cmd
 
 	case secK8s:
@@ -1917,6 +1952,12 @@ func (m model) handleProc(ev ProcEvent) (tea.Model, tea.Cmd) {
 			}
 			m.finishAppRun(ev.Code)
 			m.renderLog()
+			// Rediscover addresses straight away: the point of App Services is
+			// that a deploy's URL should be there without being hunted for in
+			// the log after it has scrolled away.
+			if ev.Code == 0 {
+				return m, m.refreshAppServicesCmd()
+			}
 			return m, nil
 		}
 		// A kubeconfig change on the gateway makes the cluster list stale, so
