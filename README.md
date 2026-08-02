@@ -261,6 +261,25 @@ three names — `microk8s`, `microk8s-cluster`, and `admin` — so without renam
 a second cluster would silently overwrite the first. Existing contexts in the
 gateway's kubeconfig are preserved by the merge.
 
+The merge never destroys an existing kubeconfig. The previous file is saved as
+`~/.kube/config.aidt-bak`, and a standalone copy of the new cluster is always
+written to `~/.kube/aidt-<context>.conf`.
+
+If the gateway's existing kubeconfig references a certificate file that no
+longer exists, the preferred merge (which inlines certificates) cannot read it.
+AIDT falls back to merging without inlining, so one stale entry cannot block a
+new cluster. If even that fails, the existing config is left untouched and the
+cluster is used through its standalone file:
+
+```bash
+export KUBECONFIG=~/.kube/aidt-<context>.conf
+kubectl get nodes
+```
+
+Any `KUBECONFIG` exported in the environment is ignored: the merge always
+targets `~/.kube/config`, so an inherited value cannot silently redirect the
+`use-context` write to a file that was never backed up.
+
 The kubeconfig contains admin credentials. It is read from the node and written
 to the gateway over SSH stdin, never as a command argument and never into the
 deploy log, and it lands in a mode-`0600` file. Bastion setup is best effort: if

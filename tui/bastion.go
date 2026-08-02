@@ -66,29 +66,77 @@ export PATH="/usr/local/bin:$HOME/.local/bin:$PATH"
 CTX="${1:-}"
 [ -n "$CTX" ] || { echo "[bastion] ERROR: no context name given" >&2; exit 1; }
 
+# Ignore any KUBECONFIG inherited from the environment. This script always
+# targets the user's default config, and an inherited value would redirect both
+# the reads and the use-context write — which modifies a file — to somewhere we
+# never backed up. Per-command KUBECONFIG below is set explicitly.
+unset KUBECONFIG
+
 KUBE_DIR="$HOME/.kube"
 mkdir -p "$KUBE_DIR"
 INCOMING="$(mktemp)"
 MERGED="$(mktemp)"
-trap 'rm -f "$INCOMING" "$MERGED"' EXIT
+ERRLOG="$(mktemp)"
+trap 'rm -f "$INCOMING" "$MERGED" "$ERRLOG"' EXIT
 cat > "$INCOMING"
 [ -s "$INCOMING" ] || { echo "[bastion] ERROR: empty kubeconfig on stdin" >&2; exit 1; }
 
 ` + kubectlInstallFragment + `
 
-if [ -s "$KUBE_DIR/config" ]; then
-  # --flatten inlines the certs so the merged file stands alone. Merging keeps
-  # any clusters the operator already had.
-  KUBECONFIG="$KUBE_DIR/config:$INCOMING" kubectl config view --flatten > "$MERGED"
-  [ -s "$MERGED" ] || { echo "[bastion] ERROR: merge produced an empty kubeconfig" >&2; exit 1; }
-  cp "$MERGED" "$KUBE_DIR/config"
-else
-  cp "$INCOMING" "$KUBE_DIR/config"
-fi
-chmod 600 "$KUBE_DIR/config"
+# Always keep a standalone copy. If the operator's existing kubeconfig turns out
+# to be unmergeable, this is still a working way to reach the cluster.
+STANDALONE="$KUBE_DIR/aidt-$CTX.conf"
+cp "$INCOMING" "$STANDALONE"
+chmod 600 "$STANDALONE"
 
-kubectl config use-context "$CTX" >/dev/null
-echo "[bastion] context '$CTX' is active in $KUBE_DIR/config"
+if [ ! -s "$KUBE_DIR/config" ]; then
+  cp "$INCOMING" "$KUBE_DIR/config"
+  chmod 600 "$KUBE_DIR/config"
+  kubectl config use-context "$CTX" >/dev/null
+  echo "AIDT_BASTION_MERGED $CTX"
+  echo "[bastion] context '$CTX' is active in $KUBE_DIR/config"
+else
+  # Never replace a config we have not backed up.
+  cp "$KUBE_DIR/config" "$KUBE_DIR/config.aidt-bak"
+  chmod 600 "$KUBE_DIR/config.aidt-bak"
+
+  merged=0
+  # Preferred: --flatten inlines every referenced cert so the result stands
+  # alone. It reads those files, though, so one stale entry pointing at a
+  # deleted cert is enough to fail the whole merge.
+  if KUBECONFIG="$KUBE_DIR/config:$INCOMING" kubectl config view --flatten > "$MERGED" 2>"$ERRLOG"; then
+    merged=1
+  elif KUBECONFIG="$KUBE_DIR/config:$INCOMING" kubectl config view --raw > "$MERGED" 2>>"$ERRLOG"; then
+    # Fall back to keeping file references as-is. --raw still emits real
+    # credentials (a plain "config view" would redact them into a broken file),
+    # but it never opens the files an existing entry points at.
+    merged=1
+    echo "[bastion] NOTE: an existing kubeconfig entry references a missing file;"
+    echo "[bastion]       merged without inlining certificates."
+  fi
+
+  # A merge that dropped our context is worse than no merge at all.
+  if [ "$merged" = 1 ] && [ -s "$MERGED" ] &&
+     kubectl --kubeconfig="$MERGED" config get-contexts "$CTX" >/dev/null 2>&1; then
+    cp "$MERGED" "$KUBE_DIR/config"
+    chmod 600 "$KUBE_DIR/config"
+    kubectl config use-context "$CTX" >/dev/null
+    echo "AIDT_BASTION_MERGED $CTX"
+    echo "[bastion] context '$CTX' is active in $KUBE_DIR/config"
+    echo "[bastion] previous kubeconfig saved as $KUBE_DIR/config.aidt-bak"
+  else
+    echo "[bastion] WARNING: could not merge into $KUBE_DIR/config, which is unchanged." >&2
+    sed 's/^/[bastion]   /' "$ERRLOG" >&2 || true
+    echo "AIDT_BASTION_STANDALONE $STANDALONE"
+    echo "[bastion] The cluster is still reachable from this host:"
+    echo "[bastion]   export KUBECONFIG=$STANDALONE"
+    echo "[bastion]   kubectl get nodes"
+    KUBECONFIG="$STANDALONE" kubectl get nodes 2>&1 | head -5 ||
+      echo "[bastion] NOTE: kubectl could not reach the cluster yet"
+    exit 0
+  fi
+fi
+
 kubectl get nodes 2>&1 | head -5 || echo "[bastion] NOTE: kubectl could not reach the cluster yet"
 `
 
@@ -210,7 +258,24 @@ type bastionReadyMsg struct {
 	host    string
 	context string
 	log     string
-	err     error
+	// standalone is set when the cluster could not be merged into the operator's
+	// existing kubeconfig and was installed as its own file instead. Reporting
+	// the wrong one of these two would send the operator to a context that does
+	// not exist.
+	standalone string
+	err        error
+}
+
+// parseBastionOutcome reads the markers the merge script prints to say whether
+// the cluster landed in the default kubeconfig or in a standalone file.
+func parseBastionOutcome(log string) (standalone string) {
+	const marker = "AIDT_BASTION_STANDALONE "
+	for _, line := range strings.Split(log, "\n") {
+		if i := strings.Index(line, marker); i >= 0 {
+			return strings.TrimSpace(line[i+len(marker):])
+		}
+	}
+	return ""
 }
 
 // microk8sBastionCmd wires a freshly deployed MicroK8s cluster into the Olla
@@ -279,6 +344,9 @@ func bastionSetupCmd(t bastionTargets) tea.Cmd {
 			return fail(err)
 		}
 		out, err := installBastionKubeconfig(t.gateway, t.gatewayUser, t.gatewayPass, t.context, cfg)
-		return bastionReadyMsg{host: t.gateway, context: t.context, log: out, err: err}
+		return bastionReadyMsg{
+			host: t.gateway, context: t.context, log: out,
+			standalone: parseBastionOutcome(out), err: err,
+		}
 	}
 }

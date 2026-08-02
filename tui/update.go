@@ -220,10 +220,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.logLines = append(m.logLines, line)
 			}
 		}
-		if msg.err != nil {
+		switch {
+		case msg.err != nil:
 			m.logLines = append(m.logLines, "<<< bastion setup failed: "+msg.err.Error())
 			m.notice = "cluster deployed, but bastion setup failed — see Output"
-		} else {
+		case msg.standalone != "":
+			// The existing kubeconfig could not be merged into, so pointing the
+			// operator at a context that is not there would just waste their time.
+			m.logLines = append(m.logLines,
+				"<<< bastion ready on "+msg.host+" — ssh in and run: KUBECONFIG="+msg.standalone+" kubectl get nodes")
+			m.notice = "bastion ready on " + msg.host + " (standalone kubeconfig — see Output)"
+		default:
 			m.logLines = append(m.logLines,
 				"<<< bastion ready on "+msg.host+" — ssh in and run: kubectl --context "+msg.context+" get nodes")
 			m.notice = "bastion ready on " + msg.host + " (context " + msg.context + ")"
