@@ -65,11 +65,11 @@ if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
   echo "[deploy] installing Node.js 22 + npm via NodeSource (sudo)…"
   case "${ID:-}" in
     ubuntu|debian)
-      curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+      curl -fsSL --connect-timeout 15 --max-time 300 https://deb.nodesource.com/setup_22.x | sudo -E bash -
       sudo DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs
       ;;
     *)
-      curl -fsSL https://rpm.nodesource.com/setup_22.x | sudo -E bash -
+      curl -fsSL --connect-timeout 15 --max-time 300 https://rpm.nodesource.com/setup_22.x | sudo -E bash -
       sudo dnf install -y nodejs 2>/dev/null || sudo yum install -y nodejs
       ;;
   esac
@@ -156,7 +156,7 @@ else
     esac
   fi
   OBSIDIAN_META="$(mktemp)"
-  curl -fsSL https://api.github.com/repos/obsidianmd/obsidian-releases/releases/latest -o "$OBSIDIAN_META"
+  curl -fsSL --connect-timeout 15 --max-time 60 https://api.github.com/repos/obsidianmd/obsidian-releases/releases/latest -o "$OBSIDIAN_META"
   OBSIDIAN_VERSION="$(sed -n 's/.*"tag_name":[[:space:]]*"v\([^"]*\)".*/\1/p' "$OBSIDIAN_META" | head -1)"
   rm -f "$OBSIDIAN_META"
   [ -n "$OBSIDIAN_VERSION" ] || { echo "[deploy] ERROR: could not resolve the latest Obsidian version" >&2; exit 1; }
@@ -174,7 +174,9 @@ else
   esac
   OBSIDIAN_URL="https://github.com/obsidianmd/obsidian-releases/releases/download/v$OBSIDIAN_VERSION/$OBSIDIAN_ASSET"
   OBSIDIAN_TMP="$(mktemp)"
-  curl -fsSL "$OBSIDIAN_URL" -o "$OBSIDIAN_TMP"
+  # No overall cap: this is ~136MB and a slow link is legitimate. Abort only if
+  # the transfer genuinely stalls, so a dead connection cannot hang the deploy.
+  curl -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 "$OBSIDIAN_URL" -o "$OBSIDIAN_TMP"
   [ -s "$OBSIDIAN_TMP" ] || { rm -f "$OBSIDIAN_TMP"; echo "[deploy] ERROR: Obsidian download was empty" >&2; exit 1; }
   mv "$OBSIDIAN_TMP" "$HOME/.local/bin/obsidian"
   chmod 0755 "$HOME/.local/bin/obsidian"
@@ -208,7 +210,7 @@ if ! command -v crush >/dev/null 2>&1; then
       $SUDO apt-get update -y
       $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl git gnupg
       $SUDO mkdir -p /etc/apt/keyrings
-      curl -fsSL https://repo.charm.sh/apt/gpg.key | $SUDO gpg --dearmor --batch --yes -o /etc/apt/keyrings/charm.gpg
+      curl -fsSL --connect-timeout 15 --max-time 300 https://repo.charm.sh/apt/gpg.key | $SUDO gpg --dearmor --batch --yes -o /etc/apt/keyrings/charm.gpg
       echo 'deb [signed-by=/etc/apt/keyrings/charm.gpg] https://repo.charm.sh/apt/ * *' | $SUDO tee /etc/apt/sources.list.d/charm.list >/dev/null
       $SUDO apt-get update -y
       $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y crush
@@ -317,7 +319,7 @@ var agentCatalog = []agentDef{
 
 const openCodeInstallFragment = `echo "[deploy] installing/updating OpenCode from opencode.ai…"
 INSTALLER="$(mktemp)"
-curl -fsSL https://opencode.ai/install -o "$INSTALLER"
+curl -fsSL --connect-timeout 15 --max-time 300 https://opencode.ai/install -o "$INSTALLER"
 bash "$INSTALLER"
 rm -f "$INSTALLER"
 export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$PATH"
@@ -328,7 +330,7 @@ echo "[deploy] OpenCode ready: $(command -v opencode)"
 
 const gooseInstallFragment = `echo "[deploy] installing/updating Goose from the official AAIF release…"
 INSTALLER="$(mktemp)"
-curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh -o "$INSTALLER"
+curl -fsSL --connect-timeout 15 --max-time 300 https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh -o "$INSTALLER"
 CONFIGURE=false bash "$INSTALLER"
 rm -f "$INSTALLER"
 export PATH="$HOME/.local/bin:$PATH"
@@ -339,7 +341,7 @@ echo "[deploy] Goose ready: $(command -v goose)"
 
 const grokInstallFragment = `echo "[deploy] installing/updating Grok Build from x.ai…"
 INSTALLER="$(mktemp)"
-curl -fsSL https://x.ai/cli/install.sh -o "$INSTALLER"
+curl -fsSL --connect-timeout 15 --max-time 300 https://x.ai/cli/install.sh -o "$INSTALLER"
 bash "$INSTALLER"
 rm -f "$INSTALLER"
 export PATH="$HOME/.grok/bin:$HOME/.local/bin:$PATH"
@@ -350,7 +352,7 @@ echo "[deploy] Grok Build ready: $(command -v grok)"
 
 const claudeCodeInstallFragment = `echo "[deploy] installing/updating Claude Code from claude.ai…"
 INSTALLER="$(mktemp)"
-curl -fsSL https://claude.ai/install.sh -o "$INSTALLER"
+curl -fsSL --connect-timeout 15 --max-time 300 https://claude.ai/install.sh -o "$INSTALLER"
 bash "$INSTALLER"
 rm -f "$INSTALLER"
 export PATH="$HOME/.local/bin:$PATH"
@@ -361,7 +363,7 @@ echo "[deploy] Claude Code ready: $(command -v claude)"
 
 const codexInstallFragment = `echo "[deploy] installing/updating Codex from OpenAI..."
 INSTALLER="$(mktemp)"
-curl -fsSL https://chatgpt.com/codex/install.sh -o "$INSTALLER"
+curl -fsSL --connect-timeout 15 --max-time 300 https://chatgpt.com/codex/install.sh -o "$INSTALLER"
 bash "$INSTALLER"
 rm -f "$INSTALLER"
 export PATH="$HOME/.local/bin:$HOME/.codex/bin:$PATH"
@@ -407,8 +409,14 @@ if command -v firewall-cmd >/dev/null 2>&1 && $SUDO firewall-cmd --state >/dev/n
   $SUDO firewall-cmd --reload >/dev/null
 fi
 OPENCODE_READY=0
-for _ in $(seq 1 20); do
-  if curl -fsS -u "$OPENCODE_SERVER_USERNAME:$OPENCODE_SERVER_PASSWORD" http://127.0.0.1:4096/global/health >/dev/null 2>&1; then OPENCODE_READY=1; break; fi
+# Every attempt is capped. systemd binds the socket before opencode has finished
+# starting, so an uncapped curl connects and then waits for a response that is
+# not coming yet — the loop never gets to iterate and the deploy hangs for good
+# rather than failing. </dev/null keeps curl from ever reaching for the terminal.
+for _ in $(seq 1 30); do
+  if curl -fsS --connect-timeout 2 --max-time 5 \
+      -u "$OPENCODE_SERVER_USERNAME:$OPENCODE_SERVER_PASSWORD" \
+      http://127.0.0.1:4096/global/health >/dev/null 2>&1 </dev/null; then OPENCODE_READY=1; break; fi
   sleep 1
 done
 if [ "$OPENCODE_READY" -ne 1 ]; then
@@ -443,7 +451,7 @@ echo "[update] Crush ready: $(crush --version 2>/dev/null || command -v crush)"
 const hermesUpdateFragment = `export PATH="/usr/local/bin:$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
 echo "[update] installing latest Hermes from the official installer…"
 INSTALLER="$(mktemp)"
-curl -fsSL https://hermes-agent.nousresearch.com/install.sh -o "$INSTALLER"
+curl -fsSL --connect-timeout 15 --max-time 300 https://hermes-agent.nousresearch.com/install.sh -o "$INSTALLER"
 bash "$INSTALLER" --skip-setup
 rm -f "$INSTALLER"
 hash -r 2>/dev/null || true
@@ -459,7 +467,7 @@ hash -r 2>/dev/null || true
 if ! command -v hermes >/dev/null 2>&1; then
   echo "[deploy] installing hermes (official installer, skip setup)…"
   # --skip-setup: no interactive wizard. HERMES_NONINTERACTIVE is also set by caller.
-  curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- --skip-setup
+  curl -fsSL --connect-timeout 15 --max-time 300 https://hermes-agent.nousresearch.com/install.sh | bash -s -- --skip-setup
   export PATH="/usr/local/bin:$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
   hash -r 2>/dev/null || true
 fi
@@ -503,7 +511,7 @@ if ! command -v openclaw >/dev/null 2>&1; then
 fi
 if ! command -v openclaw >/dev/null 2>&1; then
   echo "[deploy] npm path missed; trying official install.sh…"
-  curl -fsSL https://openclaw.ai/install.sh | bash
+  curl -fsSL --connect-timeout 15 --max-time 300 https://openclaw.ai/install.sh | bash
   export PATH="/usr/local/bin:$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
   hash -r 2>/dev/null || true
 fi

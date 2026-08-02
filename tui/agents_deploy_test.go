@@ -250,7 +250,10 @@ func TestNewAgentDeployScriptsUseOfficialInstallers(t *testing.T) {
 	m.tokFile = filepath.Join(t.TempDir(), "tui.json")
 	m.token = "tok"
 	wants := map[string][]string{
-		"OpenCode":    {"https://opencode.ai/install", "AIDT OpenCode configuration", "aidt-opencode.service", "systemctl restart aidt-opencode.service", "--port 4096", "/global/health", "opencode-server.env", "curl -fsS -u"},
+		// The health probe is checked by content rather than by an exact command
+		// string, which broke when the invocation grew timeout flags. That the
+		// probe authenticates is asserted via the credential variables below.
+		"OpenCode":    {"https://opencode.ai/install", "AIDT OpenCode configuration", "aidt-opencode.service", "systemctl restart aidt-opencode.service", "--port 4096", "/global/health", "opencode-server.env", `-u "$OPENCODE_SERVER_USERNAME:$OPENCODE_SERVER_PASSWORD"`},
 		"Goose":       {"github.com/aaif-goose/goose/releases/download/stable/download_cli.sh", "writing Olla provider for Goose"},
 		"Grok Build":  {"https://x.ai/cli/install.sh", "AIDT Grok Build configuration"},
 		"Claude Code": {"https://claude.ai/install.sh", "Claude Code installed"},
