@@ -422,6 +422,14 @@ VM through AIDT also clears any agent registrations on that host. If a host was
 already deleted externally, Remove still clears the stale registration and
 reports remote cleanup as unconfirmed.
 
+Each deploy also writes `~/.config/aidt/agent-env.sh` and sources it from
+`~/.bashrc`, so an agent points at Olla in **every** shell on the host rather
+than only in the one AIDT launches. Without it, the same binary started from a
+plain SSH login or a brokered terminal falls back to its own default
+configuration and talks to its vendor's endpoint instead. The file is mode
+`0600` because it sources the per-agent credential files, and it is regenerated
+on every deploy.
+
 Before installing an agent, AIDT checks for Obsidian and installs the official
 AppImage when it is absent. Every agent launches in the shared Obsidian vault
 at `~/Obsidian/AIDT-Agent-Vault`, so generated notes and project context remain

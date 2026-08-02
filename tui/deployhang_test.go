@@ -91,10 +91,24 @@ func TestAgentDeploysPersistAgentPathForOtherShells(t *testing.T) {
 				t.Errorf("%s deploy does not put %s on the persisted PATH", a.name, dir)
 			}
 		}
-		// Guarded by a marker the block itself writes, or a redeploy appends
-		// another copy every time.
-		if strings.Count(script, "# AIDT agent tools") < 2 {
-			t.Errorf("%s deploy does not guard the .bashrc block against duplication", a.name)
+		// One sourcing line in ~/.bashrc, and the block is deleted before being
+		// rewritten, so a redeploy cannot leave two behind.
+		if !strings.Contains(script, "# >>> AIDT agent env >>>") {
+			t.Errorf("%s deploy does not add the sourcing block to ~/.bashrc", a.name)
+		}
+		if !strings.Contains(script, `sed -i -e '/^# >>> AIDT agent env >>>$/,/^# <<< AIDT agent env <<<$/d'`) {
+			t.Errorf("%s deploy does not remove a previous block before writing one", a.name)
+		}
+		// An agent started outside AIDT must still reach the pool, which means
+		// the launch-time wiring in agentOpenCmd has to be persisted too.
+		for _, want := range []string{"OPENCODE_CONFIG=", "GROK_HOME=", "CODEX_HOME=", "GOOSE_PROVIDER=olla"} {
+			if !strings.Contains(script, want) {
+				t.Errorf("%s deploy does not persist %s, so a shell it did not launch talks to the vendor endpoint", a.name, want)
+			}
+		}
+		// The generated file holds sourced tokens; it must not be world readable.
+		if !strings.Contains(script, `chmod 600 "$HOME/.config/aidt/agent-env.sh"`) {
+			t.Errorf("%s deploy leaves agent-env.sh readable by other users", a.name)
 		}
 	}
 }
