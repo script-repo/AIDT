@@ -142,7 +142,12 @@ echo "[deploy] vault ready: $AIDT_VAULT (schema: AGENTS.md)"
 
 // vaultSetup is the full workspace bootstrap: install Obsidian, then scaffold
 // the shared vault. Every agent deploy path runs this.
-func vaultSetup() string { return obsidianBootstrap + vaultScaffold() }
+func vaultSetup() string {
+	// agentPathBootstrap goes here because every deploy path runs vaultSetup
+	// exactly once, so the agent bin directories reach ~/.bashrc no matter which
+	// agent is being installed.
+	return obsidianBootstrap + vaultScaffold() + agentPathBootstrap
+}
 
 // agentID is the vault identity for an agent: kebab-case of its catalog name.
 // Task routing matches `for:` values against exactly this string.

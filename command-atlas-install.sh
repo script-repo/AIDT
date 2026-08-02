@@ -182,6 +182,12 @@ Type=simple
 User=$ATLAS_USER
 WorkingDirectory=$APP_DIR
 EnvironmentFile=$ENV_FILE
+# Shells are spawned with this process's environment, and systemd's default PATH
+# omits every per-user bin directory, so a terminal here could not find agents
+# like opencode. SHELL is set because the app falls back to a non-login bash,
+# which never reads ~/.profile.
+Environment=SHELL=/bin/bash
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin:$ATLAS_HOME/.local/bin:$ATLAS_HOME/.npm-global/bin:$ATLAS_HOME/.opencode/bin:$ATLAS_HOME/.grok/bin:$ATLAS_HOME/.codex/bin
 ExecStart=$(command -v node) $APP_DIR/server.js
 Restart=on-failure
 RestartSec=3
@@ -190,7 +196,11 @@ RestartSec=3
 WantedBy=multi-user.target
 UNIT
 run_root systemctl daemon-reload
-run_root systemctl enable --now command-atlas >/dev/null
+run_root systemctl enable command-atlas >/dev/null 2>&1
+# restart, not "enable --now": --now leaves an already-running service alone, so
+# a redeploy would keep the old unit's environment and any fix here would look
+# like it had no effect.
+run_root systemctl restart command-atlas
 sleep 2
 if ! run_root systemctl is-active --quiet command-atlas; then
 	# Surface the reason here rather than making the operator go and find it.

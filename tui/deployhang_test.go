@@ -74,3 +74,27 @@ func TestOpenCodeReadinessProbeCannotHang(t *testing.T) {
 		t.Error("readiness loop no longer reports a timeout")
 	}
 }
+
+// AIDT injects the agent bin directories only when it launches an agent itself
+// (loginShell), so any other shell on the host — a plain SSH login, or a
+// terminal brokered by a deployment like Command Atlas — could not find
+// opencode. Every deploy now persists them.
+func TestAgentDeploysPersistAgentPathForOtherShells(t *testing.T) {
+	m := newModel("http://10.0.0.1:40114", "rocky", "pw")
+	for _, a := range agentCatalog {
+		if !a.deployable {
+			continue
+		}
+		script := m.agentDeployScript(a)
+		for _, dir := range []string{"$HOME/.opencode/bin", "$HOME/.npm-global/bin", "$HOME/.local/bin"} {
+			if !strings.Contains(script, dir) {
+				t.Errorf("%s deploy does not put %s on the persisted PATH", a.name, dir)
+			}
+		}
+		// Guarded by a marker the block itself writes, or a redeploy appends
+		// another copy every time.
+		if strings.Count(script, "# AIDT agent tools") < 2 {
+			t.Errorf("%s deploy does not guard the .bashrc block against duplication", a.name)
+		}
+	}
+}

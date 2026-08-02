@@ -85,6 +85,24 @@ grep -q '.local/bin' "$HOME/.bashrc" 2>/dev/null || echo 'export PATH="$HOME/.lo
 grep -q '/usr/local/bin' "$HOME/.bashrc" 2>/dev/null || echo 'export PATH="/usr/local/bin:$PATH"' >> "$HOME/.bashrc"
 `
 
+// agentPathBootstrap makes the agent CLIs findable in every future shell on the
+// host, not only in the one AIDT launches.
+//
+// loginShell() prepends these directories when AIDT opens an agent, so AIDT's
+// own sessions always worked. Anything else — a plain SSH login, a vault helper,
+// or a terminal brokered by another deployment — inherited a PATH without them
+// and could not find `opencode` at all. The marker keeps a redeploy from
+// appending the block again.
+const agentPathBootstrap = `if ! grep -q '# AIDT agent tools' "$HOME/.bashrc" 2>/dev/null; then
+  cat >> "$HOME/.bashrc" <<'AIDT_AGENT_PATH'
+
+# AIDT agent tools
+export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.opencode/bin:$HOME/.grok/bin:$HOME/.codex/bin:$PATH"
+AIDT_AGENT_PATH
+  echo "[deploy] added the agent bin directories to ~/.bashrc"
+fi
+`
+
 // cliDepsBootstrap installs the small set of tools required by the official
 // standalone installers without pulling in Node.js for native CLIs.
 const cliDepsBootstrap = `echo "[deploy] ensuring CLI installer dependencies…"
