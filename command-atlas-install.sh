@@ -133,11 +133,26 @@ fi
 [ -f "$APP_DIR/server.js" ] || die "$APP_DIR/server.js not found in the repository"
 run_root chown -R "$ATLAS_USER" "$INSTALL_DIR"
 
-# node-pty ships a native addon; the committed node_modules was built elsewhere.
+# The repository commits node_modules, and node-pty's prebuilds there cover only
+# darwin-arm64/win32. With that tree in place npm considers the install complete
+# and never compiles the addon for this platform, so the app starts and
+# immediately exits with "Missing dependencies". Remove it and install clean.
 log "installing node dependencies (node-pty compiles a native addon)…"
-run_as_user "$ATLAS_USER" env HOME="$(getent passwd "$ATLAS_USER" | cut -d: -f6)" \
+ATLAS_HOME="$(getent passwd "$ATLAS_USER" | cut -d: -f6)"
+run_root rm -rf "$APP_DIR/node_modules"
+run_as_user "$ATLAS_USER" env HOME="$ATLAS_HOME" \
 	npm --prefix "$APP_DIR" install --no-audit --no-fund >/dev/null ||
 	die "npm install failed (build tools or network?)"
+
+# A successful npm exit is not proof the native addon loads: verify before
+# handing the service to systemd, so a build problem is reported here instead of
+# as a crash loop the operator has to read the journal to understand.
+# Absolute paths on purpose: `node -e` resolves bare module names from the
+# current directory, which is not the app directory when this runs.
+run_as_user "$ATLAS_USER" env HOME="$ATLAS_HOME" \
+	node -e "require('$APP_DIR/node_modules/node-pty'); require('$APP_DIR/node_modules/ws');" >/dev/null 2>&1 ||
+	die "node-pty did not load after installation — check the build toolchain (gcc/make/python3)"
+log "node-pty built for $(uname -m) and loads correctly"
 
 # --- token --------------------------------------------------------------------
 # Pinned so the published URL keeps working across restarts. nginx injects it,
@@ -177,8 +192,12 @@ UNIT
 run_root systemctl daemon-reload
 run_root systemctl enable --now command-atlas >/dev/null
 sleep 2
-run_root systemctl is-active --quiet command-atlas ||
-	die "command-atlas failed to start (journalctl -u command-atlas)"
+if ! run_root systemctl is-active --quiet command-atlas; then
+	# Surface the reason here rather than making the operator go and find it.
+	echo "[atlas] --- last journal entries ---" >&2
+	run_root journalctl -u command-atlas --no-pager -n 15 2>&1 | sed 's/^/[atlas]   /' >&2 || true
+	die "command-atlas failed to start"
+fi
 
 # --- PAM ----------------------------------------------------------------------
 # nginx must be able to verify local passwords, which means reading the shadow
