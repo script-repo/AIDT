@@ -413,6 +413,30 @@ it was created.
 | `a` / `e` | Add or edit an application definition. |
 | `X` | Drop the definition from the catalog, leaving deployed workloads running. |
 
+After a successful deploy, the application's primary Service is published on a
+NodePort so it is reachable from outside the cluster and appears with a URL in
+[App Services](#app-services). Charts overwhelmingly default to `ClusterIP`,
+which otherwise leaves a healthy install with nowhere to browse to.
+
+Only the *primary* Service is published — the one named after the release, or
+the sole Service when there is only one. Publishing everything a release creates
+would expose its dependencies too: an Open WebUI install alone would put Redis
+and an Ollama API on every node address with no authentication. A headless
+Service is never touched, and one already on `LoadBalancer` or `NodePort` is
+left as it was.
+
+Set **Publish after deploy** to "Do not publish" on applications with no
+user-facing endpoint. The two built-in operators (CloudNativePG, Redis) ship
+that way already, since their Services are webhook and metrics endpoints rather
+than anything to open.
+
+This is done by patching the Service after the install rather than by passing
+`--set service.type=NodePort`. Chart value paths are not standardised — a chart
+may use `service.type`, `server.service.type`, or no such key at all — and a
+`--set` against a chart whose schema disagrees fails the whole deploy. Patching
+also works for manifest installs, which take no values. It is re-applied on
+every deploy, so a `helm upgrade` that resets the type is corrected immediately.
+
 Rows are coloured by state: grey when the app is deployed nowhere, green once it
 is installed, and amber when a recorded installation was not found in its
 cluster at the last refresh. Deploying the same app to another context — or to
@@ -457,11 +481,13 @@ be re-pointed, so a remembered URL would eventually send you somewhere wrong —
 the addresses are read from the cluster every time.
 
 An installation that exposes nothing still appears, marked as such. That is a
-real answer: a chart installed with its default `ClusterIP` service is running
-but unreachable from outside the cluster, and saying so is more useful than
-omitting the row, which would read as "not deployed". If you want such an app
-published, redeploy it with a service type its chart exposes — for example
-`service.type=LoadBalancer` in the application's Helm values.
+real answer: a workload with only a `ClusterIP` service is running but
+unreachable from outside the cluster, and saying so is more useful than omitting
+the row, which would read as "not deployed". This is now the exception rather
+than the rule — App Deploy publishes the primary Service on a NodePort after
+every deploy — but it still happens for applications set to "Do not publish",
+for anything deployed before that behaviour existed, and for services beyond the
+primary one. Redeploy with `d` to publish an app installed earlier.
 
 Scoping is best-effort. A Helm release usually stamps
 `app.kubernetes.io/instance` on its objects, but that is a convention rather

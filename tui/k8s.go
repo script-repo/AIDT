@@ -307,9 +307,67 @@ func appDeployScript(a k8sApp, d appDeployment) (string, error) {
 		return "", errors.New("app has neither a chart nor a manifest URL")
 	}
 
+	if a.exposeMode() == exposeNodePort {
+		b.WriteString(exposeFragment(ctx, ns, d.Release))
+	}
 	b.WriteString("echo " + q("AIDT_APP_DEPLOYED "+a.Name) + "\n")
 	b.WriteString("kubectl --context " + q(ctx) + " --namespace " + q(ns) + " get all 2>&1 | head -20 || true\n")
 	return b.String(), nil
+}
+
+// exposeFragment publishes an application's primary Service on a NodePort so it
+// is reachable from outside the cluster and shows up with a URL in App
+// Services. Charts overwhelmingly default to ClusterIP, which leaves a
+// perfectly healthy app with nowhere to browse to.
+//
+// This patches the Service after the install rather than passing
+// `--set service.type=NodePort`, for two reasons. Value paths are not
+// standardised — a chart may use service.type, server.service.type, or no such
+// key at all — and a --set against a chart whose schema disagrees fails the
+// whole deploy. Patching also works identically for manifest installs, which
+// take no values. The patch is re-applied on every deploy, so a helm upgrade
+// that resets the type to ClusterIP is corrected immediately after.
+//
+// Only the primary Service is touched. Exposing everything a release creates
+// would publish its dependencies too — an Open WebUI install alone would put
+// Redis and an Ollama API on every node address with no authentication.
+func exposeFragment(ctx, ns, release string) string {
+	q := func(s string) string { return "'" + shSingle(s) + "'" }
+	return `
+# --- publish the primary service on a NodePort ---
+AIDT_X_CTX=` + q(ctx) + `
+AIDT_X_NS=` + q(ns) + `
+AIDT_X_REL=` + q(release) + `
+aidt_expose() {
+  local svcs target name type cip
+  svcs=$(kubectl --context "$AIDT_X_CTX" -n "$AIDT_X_NS" get svc \
+    -o jsonpath='{range .items[*]}{.metadata.name} {.spec.type} {.spec.clusterIP}{"\n"}{end}' 2>/dev/null)
+  [ -n "$svcs" ] || { echo "AIDT_EXPOSE_SKIP - no services found"; return 0; }
+
+  # The release's own name is the Helm convention for the primary service. With
+  # only one service there is no ambiguity. Anything else is left alone rather
+  # than guessed at.
+  target=$(printf '%s\n' "$svcs" | awk -v rel="$AIDT_X_REL" '
+    $1==rel {print; found=1; exit}
+    NF {n++; last=$0}
+    END {if (!found && n==1) print last}')
+  [ -n "$target" ] || { echo "AIDT_EXPOSE_SKIP - no primary service could be identified"; return 0; }
+
+  set -- $target; name=$1; type=$2; cip=$3
+  if [ "$cip" = "None" ]; then
+    echo "AIDT_EXPOSE_SKIP $name headless service cannot be published"
+  elif [ "$type" != "ClusterIP" ]; then
+    echo "AIDT_EXPOSE_SKIP $name already $type"
+  elif kubectl --context "$AIDT_X_CTX" -n "$AIDT_X_NS" patch svc "$name" \
+        -p '{"spec":{"type":"NodePort"}}' >/dev/null 2>&1; then
+    echo "AIDT_EXPOSED $name"
+  else
+    echo "AIDT_EXPOSE_SKIP $name patch to NodePort failed"
+  fi
+  return 0
+}
+aidt_expose
+`
 }
 
 // appRemoveScript builds the uninstall for one recorded installation.

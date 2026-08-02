@@ -205,6 +205,101 @@ func TestAppDeployScriptHelm(t *testing.T) {
 	}
 }
 
+func TestAppDeployScriptPublishesPrimaryService(t *testing.T) {
+	a := k8sApp{Name: "Web", Repo: "https://r", Chart: "web"}
+	d := appDeployment{App: "Web", Context: "prod", Namespace: "ai", Release: "web", Kind: appKindHelm}
+	got, err := appDeployScript(a, d)
+	if err != nil {
+		t.Fatalf("appDeployScript: %v", err)
+	}
+	for _, want := range []string{"aidt_expose", `"spec":{"type":"NodePort"}`, "AIDT_EXPOSED"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("deploy script missing %q\n%s", want, got)
+		}
+	}
+	// The publish step must come after the install, or there is no Service to
+	// patch yet.
+	if strings.Index(got, "aidt_expose\n") < strings.Index(got, "helm upgrade --install") {
+		t.Error("expose step runs before the install")
+	}
+	// Publishing must not be done by passing values: chart value paths are not
+	// standardised and a --set against a disagreeing schema fails the deploy.
+	if strings.Contains(got, "--set service.type") {
+		t.Errorf("publish was implemented as a --set:\n%s", got)
+	}
+
+	// A manifest install has no values at all and must still be published.
+	mo := k8sApp{Name: "Thing", ManifestURL: "https://example.com/app.yaml"}
+	md := appDeployment{App: "Thing", Context: "prod", Namespace: "ops", Release: "thing", Kind: appKindManifest}
+	mGot, err := appDeployScript(mo, md)
+	if err != nil {
+		t.Fatalf("appDeployScript(manifest): %v", err)
+	}
+	if !strings.Contains(mGot, "aidt_expose") {
+		t.Errorf("manifest install is not published:\n%s", mGot)
+	}
+}
+
+func TestAppDeployScriptRespectsExposeNone(t *testing.T) {
+	a := k8sApp{Name: "Op", Repo: "https://r", Chart: "op", Expose: exposeNone}
+	d := appDeployment{App: "Op", Context: "prod", Namespace: "data", Release: "op", Kind: appKindHelm}
+	got, err := appDeployScript(a, d)
+	if err != nil {
+		t.Fatalf("appDeployScript: %v", err)
+	}
+	if strings.Contains(got, "aidt_expose") {
+		t.Errorf("an app opted out of publishing was still exposed:\n%s", got)
+	}
+}
+
+func TestExposeMode(t *testing.T) {
+	// Publishing is the default, because a stock ClusterIP leaves a healthy
+	// install with no address to open.
+	if (k8sApp{}).exposeMode() != exposeNodePort {
+		t.Error("default is not to publish")
+	}
+	for _, v := range []string{"none", "None", " NONE "} {
+		if (k8sApp{Expose: v}).exposeMode() != exposeNone {
+			t.Errorf("Expose=%q did not opt out", v)
+		}
+	}
+}
+
+func TestOperatorBuiltinsAreNotPublished(t *testing.T) {
+	// Operators expose webhook and metrics endpoints, not something to browse
+	// to, and their managed databases must not land on every node address.
+	want := map[string]bool{"CloudNativePG": true, "Redis": true}
+	for _, a := range builtinApps() {
+		if want[a.Name] && a.exposeMode() != exposeNone {
+			t.Errorf("%s should not be published by default", a.Name)
+		}
+		if !want[a.Name] && a.exposeMode() != exposeNodePort {
+			t.Errorf("%s should be published by default", a.Name)
+		}
+	}
+}
+
+func TestExposeFragmentGuardsUnsafeServices(t *testing.T) {
+	got := exposeFragment("prod", "ai", "web")
+	// A headless service has no cluster IP to publish and patching it breaks
+	// the DNS contract its clients rely on.
+	if !strings.Contains(got, `"None"`) || !strings.Contains(got, "headless") {
+		t.Errorf("headless services are not guarded:\n%s", got)
+	}
+	// An app already on LoadBalancer/NodePort must be left as the operator set it.
+	if !strings.Contains(got, `"$type" != "ClusterIP"`) {
+		t.Errorf("an already-published service would be re-patched:\n%s", got)
+	}
+	// Exposing every service in a release would publish its dependencies.
+	if !strings.Contains(got, "$1==rel") {
+		t.Errorf("primary service is not selected by release name:\n%s", got)
+	}
+	// A failure to publish must not fail the deploy that already succeeded.
+	if !strings.Contains(got, "return 0") {
+		t.Errorf("expose step can fail the deploy:\n%s", got)
+	}
+}
+
 func TestAppDeployScriptOCISkipsRepoAdd(t *testing.T) {
 	a := k8sApp{Name: "n8n", Chart: "oci://reg.example.com/library/n8n"}
 	d := appDeployment{App: "n8n", Context: "prod", Namespace: "ops", Release: "n8n", Kind: appKindHelm}

@@ -662,6 +662,7 @@ func (m *model) openAppEdit(a k8sApp, replacing string) tea.Cmd {
 	m.fAppRepo, m.fAppChart = a.Repo, a.Chart
 	m.fAppVersion, m.fAppValues = a.Version, a.Values
 	m.fAppManifest, m.fAppNS = a.ManifestURL, a.defaultNamespace()
+	m.fAppExpose = a.exposeMode()
 	m.appEditingName = replacing
 
 	title := "Add application"
@@ -687,6 +688,12 @@ func (m *model) openAppEdit(a k8sApp, replacing string) tea.Cmd {
 		huh.NewInput().Key("appmanifest").Title("Manifest URL").
 			Description("used instead of a chart · kubectl apply -f").Value(&m.fAppManifest),
 		huh.NewInput().Key("appns").Title("Default namespace").Value(&m.fAppNS),
+		huh.NewSelect[string]().Key("appexpose").Title("Publish after deploy").
+			Description("NodePort makes the app reachable from App Services · operators and\nbackend services usually want 'do not publish'").
+			Options(
+				huh.NewOption("Publish the primary service on a NodePort", exposeNodePort),
+				huh.NewOption("Do not publish", exposeNone),
+			).Value(&m.fAppExpose),
 	)).WithWidth(formWidth(m)).WithShowHelp(true).WithTheme(huhTheme()).WithKeyMap(huhKM)
 	return m.form.Init()
 }
@@ -1088,6 +1095,7 @@ func (m *model) onFormComplete() tea.Cmd {
 			Values:      strings.TrimSpace(orDefault(m.fstr("appvalues"), m.fAppValues)),
 			ManifestURL: strings.TrimSpace(orDefault(m.fstr("appmanifest"), m.fAppManifest)),
 			Namespace:   strings.TrimSpace(orDefault(m.fstr("appns"), m.fAppNS)),
+			Expose:      strings.TrimSpace(orDefault(m.fstr("appexpose"), m.fAppExpose)),
 		}
 		if a.kind() == "" {
 			m.notice = "give either a chart or a manifest URL"

@@ -44,6 +44,30 @@ type k8sApp struct {
 
 	// Namespace is the suggested default; the deploy form can override it.
 	Namespace string `json:"namespace,omitempty"`
+
+	// Expose controls whether the primary Service is published on a NodePort
+	// after deploying, so the app is reachable from App Services. Empty means
+	// the default (publish); "none" opts out.
+	//
+	// Opting out matters for charts with no user-facing endpoint — an operator's
+	// webhook or metrics Service is not something to put on every node address.
+	Expose string `json:"expose,omitempty"`
+}
+
+// expose modes.
+const (
+	exposeNodePort = "nodeport"
+	exposeNone     = "none"
+)
+
+// exposeMode reports how this app is published after a deploy. Publishing is
+// the default because a chart's stock ClusterIP leaves a healthy install with
+// no address an operator can open.
+func (a k8sApp) exposeMode() string {
+	if strings.EqualFold(strings.TrimSpace(a.Expose), exposeNone) {
+		return exposeNone
+	}
+	return exposeNodePort
 }
 
 // app kinds, recorded on each deployment so removal picks the right command.
@@ -171,13 +195,18 @@ func builtinApps() []k8sApp {
 		},
 
 		// --- data services ---
+		// The two operators are not published: they expose webhook and metrics
+		// endpoints rather than anything an operator would browse to, and the
+		// databases they manage should not be reachable from every node address.
 		{
 			Name: "CloudNativePG", Desc: "PostgreSQL operator",
 			Repo: "https://cloudnative-pg.github.io/charts", Chart: "cloudnative-pg", Namespace: "data",
+			Expose: exposeNone,
 		},
 		{
 			Name: "Redis", Desc: "Redis operator (ot-container-kit)",
 			Repo: "https://ot-container-kit.github.io/helm-charts", Chart: "redis", Namespace: "data",
+			Expose: exposeNone,
 		},
 		{
 			Name: "Qdrant", Desc: "vector database",

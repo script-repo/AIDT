@@ -343,6 +343,7 @@ type model struct {
 	fAppVersion  string
 	fAppValues   string
 	fAppManifest string
+	fAppExpose   string
 	// K8S form values
 	fK8sSource   string // "microk8s" | "file"
 	fK8sPath     string
