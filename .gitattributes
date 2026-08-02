@@ -9,5 +9,8 @@
 *.tmpl text eol=lf
 *.go text eol=lf
 
+# The vault helpers are extensionless executables that run on Linux guests.
+tui/vaultfs/bin/* text eol=lf
+
 # Treat built binaries as binary (should be gitignored anyway).
 *.exe binary

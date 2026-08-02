@@ -1,0 +1,280 @@
+#!/bin/sh
+# aidt-task — the shared work queue. Claiming is an atomic mkdir, so exactly
+# one agent can ever own a task.
+#
+#   aidt-task list [--me] [--all]   open tasks (--me filters to ones you can do)
+#   aidt-task show <id>             the full task file
+#   aidt-task claim <id>            claim it; non-zero if someone beat you
+#   aidt-task done <id> "summary"   finish it
+#   aidt-task fail <id> "reason"    give up on it, honestly
+#   aidt-task release <id>          put it back in open/
+#   aidt-task new --title "..." [--for any] [--requires a,b] [--priority normal]
+#
+# Protocol and task schema: tasks/QUEUE.md. Never work an unclaimed task.
+set -eu
+TOOL=aidt-task
+. "$(dirname "$0")/aidt-common.sh"
+
+TASKS="$VAULT/tasks"
+SKILL_TOOL="$(dirname "$0")/aidt-skill"
+ME="${AIDT_AGENT_ID:-unknown}"
+
+mkdir -p "$TASKS/open" "$TASKS/claimed" "$TASKS/done" "$TASKS/failed"
+
+usage() {
+	sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
+	exit "${1:-0}"
+}
+
+json_get() { # json_get <file> <key>
+	[ -f "$1" ] || return 0
+	sed -n 's/.*"'"$2"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$1" | head -1
+}
+
+# claim_owner <claim-dir> — who holds this claim. The winner creates the
+# directory an instant before it writes claim.json, so a loser that reads too
+# early sees nothing; retry briefly rather than reporting an empty owner.
+claim_owner() {
+	i=0
+	while [ "$i" -lt 20 ]; do
+		owner="$(json_get "$1/claim.json" agent)"
+		[ -n "$owner" ] && { printf '%s\n' "$owner"; return 0; }
+		i=$((i + 1))
+		sleep 0.05 2>/dev/null || sleep 1
+	done
+	printf 'another agent\n'
+}
+
+my_caps() {
+	card="$VAULT/agents/$ME.md"
+	[ -f "$card" ] && fmlist "$card" capabilities
+}
+
+# eligible <taskfile> — exit 0 if this agent may claim it
+eligible() {
+	f="$1"
+	target="$(fm "$f" for)"
+	[ -n "$target" ] || target=any
+	case "$target" in
+	any) ;;
+	capability:*)
+		cap="${target#capability:}"
+		my_caps | grep -qx "$cap" || return 1
+		;;
+	*)
+		[ "$target" = "$ME" ] || return 1
+		;;
+	esac
+	# Every required skill must be present and usable.
+	fmlist "$f" requires | while IFS= read -r s; do
+		[ -n "$s" ] || continue
+		"$SKILL_TOOL" check "$s" >/dev/null 2>&1 || exit 1
+	done || return 1
+	return 0
+}
+
+cmd_list() {
+	mine=0
+	for a in "$@"; do
+		case "$a" in
+		--me) mine=1 ;;
+		--all) mine=0 ;;
+		*) die "unknown flag: $a" ;;
+		esac
+	done
+	if [ "$mine" = 1 ] && [ "$ME" = unknown ]; then
+		die "--me needs AIDT_AGENT_ID set (see: aidt-agent list)"
+	fi
+
+	found=0
+	for f in "$TASKS"/open/*.md; do
+		[ -f "$f" ] || continue
+		if [ "$mine" = 1 ] && ! eligible "$f"; then continue; fi
+		found=1
+		printf '%-22s %-7s %-22s %s\n' \
+			"$(fm "$f" id)" \
+			"$(fm "$f" priority)" \
+			"$(fm "$f" for)" \
+			"$(fm "$f" title)"
+	done
+	if [ "$found" = 0 ]; then
+		if [ "$mine" = 1 ]; then
+			echo "no open tasks you are eligible for"
+			echo "(check 'aidt-agent whoami' for your capabilities, and 'aidt-task list --all')"
+		else
+			echo "no open tasks"
+		fi
+	fi
+
+	inprog=0
+	for d in "$TASKS"/claimed/*/; do
+		[ -d "$d" ] || continue
+		if [ "$inprog" = 0 ]; then echo; echo "in progress:"; inprog=1; fi
+		printf '  %-22s claimed by %s at %s\n' \
+			"$(basename "$d")" \
+			"$(json_get "$d/claim.json" agent)" \
+			"$(json_get "$d/claim.json" claimed)"
+	done
+	return 0
+}
+
+find_task() { # find_task <id> -> prints the open task path
+	f="$TASKS/open/$1.md"
+	[ -f "$f" ] && { printf '%s\n' "$f"; return 0; }
+	[ -f "$TASKS/claimed/$1/task.md" ] && { printf '%s\n' "$TASKS/claimed/$1/task.md"; return 0; }
+	for st in done failed; do
+		[ -f "$TASKS/$st/$1/task.md" ] && { printf '%s\n' "$TASKS/$st/$1/task.md"; return 0; }
+	done
+	return 1
+}
+
+cmd_show() {
+	[ $# -ge 1 ] || die "usage: aidt-task show <id>"
+	f="$(find_task "$1")" || die "no such task: $1"
+	cat "$f"
+	d="$(dirname "$f")"
+	[ -f "$d/claim.json" ] && { echo; echo "--- claim ---"; cat "$d/claim.json"; }
+	[ -f "$d/result.md" ] && { echo; echo "--- result ---"; cat "$d/result.md"; }
+	return 0
+}
+
+cmd_claim() {
+	[ $# -ge 1 ] || die "usage: aidt-task claim <id>"
+	[ "$ME" = unknown ] && die "AIDT_AGENT_ID is not set — claim would be anonymous"
+	id="$1"
+	src="$TASKS/open/$id.md"
+	dst="$TASKS/claimed/$id"
+
+	[ -f "$src" ] || {
+		if [ -d "$dst" ]; then
+			die "$id is already claimed by $(claim_owner "$dst")"
+		fi
+		die "no open task: $id"
+	}
+
+	# Atomic test-and-set: mkdir fails with EEXIST for every loser. There is no
+	# window in which two agents both believe they won.
+	if ! mkdir "$dst" 2>/dev/null; then
+		die "$id is already claimed by $(claim_owner "$dst")"
+	fi
+
+	# Record ownership immediately, before moving the task file, so a loser
+	# racing us has something to report.
+	printf '{\n  "id": "%s",\n  "agent": "%s",\n  "host": "%s",\n  "claimed": "%s"\n}\n' \
+		"$id" "$ME" "$(hostname 2>/dev/null || echo unknown)" "$(now_utc)" \
+		>"$dst/claim.json"
+
+	if ! mv "$src" "$dst/task.md" 2>/dev/null; then
+		rm -rf "$dst"
+		die "$id left open/ before it could be claimed — try another task"
+	fi
+
+	echo "claimed $id -> tasks/claimed/$id"
+	echo "when finished: aidt-task done $id \"what you did\""
+}
+
+finish() { # finish <state> <id> <text>
+	state="$1" id="$2" text="$3"
+	dir="$TASKS/claimed/$id"
+	[ -d "$dir" ] || die "$id is not claimed (nothing to $state)"
+	owner="$(json_get "$dir/claim.json" agent)"
+	[ "$owner" = "$ME" ] || [ "$ME" = unknown ] ||
+		die "$id is claimed by $owner, not you — release it or leave it alone"
+	{
+		printf -- '---\n'
+		printf 'id: %s\n' "$id"
+		printf 'state: %s\n' "$state"
+		printf 'agent: %s\n' "$owner"
+		printf 'finished: %s\n' "$(now_utc)"
+		printf -- '---\n\n'
+		printf '# %s: %s\n\n' "$id" "$state"
+		printf '%s\n\n' "$text"
+		printf -- '---\n\n'
+		printf 'Reusable knowledge from this task belongs in `wiki/`, not here.\n'
+		printf 'See `AGENTS.md` §4.\n'
+	} >"$dir/result.md"
+	if [ -d "$TASKS/$state/$id" ]; then rm -rf "$TASKS/$state/$id"; fi
+	mv "$dir" "$TASKS/$state/$id"
+	echo "$state $id -> tasks/$state/$id"
+}
+
+cmd_done() {
+	[ $# -ge 1 ] || die "usage: aidt-task done <id> \"summary\""
+	finish done "$1" "${2:-Completed.}"
+}
+
+cmd_fail() {
+	[ $# -ge 1 ] || die "usage: aidt-task fail <id> \"reason\""
+	finish failed "$1" "${2:-Failed; no reason recorded.}"
+}
+
+cmd_release() {
+	[ $# -ge 1 ] || die "usage: aidt-task release <id>"
+	id="$1"
+	dir="$TASKS/claimed/$id"
+	[ -d "$dir" ] || die "$id is not claimed"
+	[ -f "$dir/task.md" ] || die "$id has no task file — inspect tasks/claimed/$id by hand"
+	mv "$dir/task.md" "$TASKS/open/$id.md"
+	rm -rf "$dir"
+	echo "released $id -> tasks/open/$id.md"
+}
+
+cmd_new() {
+	title='' target='any' requires='' priority='normal'
+	while [ $# -gt 0 ]; do
+		case "$1" in
+		--title) title="${2:-}"; shift 2 ;;
+		--for) target="${2:-any}"; shift 2 ;;
+		--requires) requires="${2:-}"; shift 2 ;;
+		--priority) priority="${2:-normal}"; shift 2 ;;
+		-h | --help) usage 0 ;;
+		*) die "unknown flag: $1" ;;
+		esac
+	done
+	[ -n "$title" ] || die "--title is required"
+
+	rand="$(od -An -N2 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n' || true)"
+	[ -n "$rand" ] || rand="$$"
+	id="$(date -u +%Y-%m-%d-%H%M)-$rand"
+	f="$TASKS/open/$id.md"
+	{
+		printf -- '---\n'
+		printf 'id: %s\n' "$id"
+		printf 'title: %s\n' "$title"
+		printf 'created: %s\n' "$(now_utc)"
+		printf 'by: %s\n' "$ME"
+		printf 'for: %s\n' "$target"
+		printf 'priority: %s\n' "$priority"
+		printf 'requires:\n'
+		if [ -n "$requires" ]; then
+			# Trailing newline matters: without it `read` drops the last item.
+			printf '%s\n' "$requires" | tr ',' '\n' | while IFS= read -r r; do
+				r="$(printf %s "$r" | sed -e 's/^[ \t]*//' -e 's/[ \t]*$//')"
+				[ -n "$r" ] && printf '  - %s\n' "$r"
+			done
+		fi
+		printf -- '---\n\n'
+		printf '## Goal\n\n%s\n\n' "$title"
+		printf '_Replace this with what done actually looks like — specific enough that\n'
+		printf 'another agent can judge it._\n\n'
+		printf '## Context\n\n- \n\n'
+		printf '## Acceptance\n\n- [ ] \n'
+	} >"$f"
+	echo "created $id -> tasks/open/$id.md"
+	echo "edit it to fill in Goal, Context, and Acceptance."
+}
+
+[ $# -ge 1 ] || usage 1
+sub="$1"
+shift
+case "$sub" in
+list) cmd_list "$@" ;;
+show) cmd_show "$@" ;;
+claim) cmd_claim "$@" ;;
+done) cmd_done "$@" ;;
+fail) cmd_fail "$@" ;;
+release) cmd_release "$@" ;;
+new) cmd_new "$@" ;;
+-h | --help | help) usage 0 ;;
+*) die "unknown command: $sub (try --help)" ;;
+esac

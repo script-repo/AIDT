@@ -53,6 +53,7 @@ archives:
       - scripts/install.sh
       - scripts/install.ps1
       - scripts/remote/*
+      - microk8s-install.sh
       - requirements.txt
       - README.md
 

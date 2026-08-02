@@ -105,12 +105,12 @@ func deepMerge(a, b map[string]any) {
 // localCrushCmd prepares Crush on the local host: it merges the olla provider
 // config locally and, for a deploy (script != ""), stages the install script;
 // then returns a consoleReadyMsg that runs locally.
-func localCrushCmd(config, script, label, agent string) tea.Cmd {
+func localCrushCmd(config, open, script, label, agent string) tea.Cmd {
 	return func() tea.Msg {
 		if err := localMergeCrushConfig(config); err != nil {
 			return notifyMsg("crush config write failed: " + err.Error())
 		}
-		cmd := crushOpenCommand
+		cmd := open
 		if script != "" {
 			abs, err := localWriteScript("~/.aidt-deploy.sh", script)
 			if err != nil {

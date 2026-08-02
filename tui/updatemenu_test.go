@@ -51,14 +51,32 @@ func TestWindowsInstallerUsesTLSAndCurlFallback(t *testing.T) {
 	assertPowerShellSyntax(t, script)
 }
 
+// runnablePowerShell returns a PowerShell interpreter that can actually be
+// executed here, or "" when there is none.
+//
+// LookPath alone is not enough: under WSL, PATH includes the Windows System32
+// directory, so powershell.exe resolves and has the executable bit set, yet
+// exec fails with "exec format error" whenever interop is unavailable. That
+// made the parser check fail on every WSL developer machine instead of
+// skipping. pwsh is tried first because it is the portable one.
+func runnablePowerShell() string {
+	for _, name := range []string{"pwsh", "powershell.exe"} {
+		path, err := exec.LookPath(name)
+		if err != nil {
+			continue
+		}
+		if err := exec.Command(path, "-NoProfile", "-Command", "exit 0").Run(); err == nil {
+			return path
+		}
+	}
+	return ""
+}
+
 func assertPowerShellSyntax(t *testing.T, script string) {
 	t.Helper()
-	powershell, err := exec.LookPath("powershell.exe")
-	if err != nil {
-		powershell, err = exec.LookPath("pwsh")
-	}
-	if err != nil {
-		t.Skip("PowerShell is unavailable for parser validation")
+	powershell := runnablePowerShell()
+	if powershell == "" {
+		t.Skip("no runnable PowerShell for parser validation")
 	}
 	cmd := exec.Command(powershell, "-NoProfile", "-Command", `$s=[Console]::In.ReadToEnd(); [void][scriptblock]::Create($s)`)
 	cmd.Stdin = strings.NewReader(script)

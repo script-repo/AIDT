@@ -343,6 +343,9 @@ func newModel(gateway, sshUser, sshPass string) model {
 		seedCustom = true
 	}
 	customDeploys, migrateCustom := migrateBuiltinCustomDeploys(customDeploys)
+	// Top up with any built-in added by a newer AIDT release, recording each one
+	// so a later delete is not undone on the next launch.
+	customDeploys, seededBuiltins, addedBuiltin := seedBuiltinCustomDeploys(customDeploys, st.SeededBuiltins, st.CustomSeeded || seedCustom)
 	vmImages := st.VMImages
 	if vmImages == nil {
 		vmImages = map[string]string{}
@@ -403,8 +406,8 @@ func newModel(gateway, sshUser, sshPass string) model {
 		vmImages:      vmImages,
 		imageByID:     map[string]string{},
 	}
-	if seedCustom || migrateCustom {
-		_ = saveCustomDeploys(tokFile, customDeploys)
+	if seedCustom || migrateCustom || addedBuiltin {
+		_ = saveCustomDeploys(tokFile, customDeploys, seededBuiltins)
 	}
 	if m.agentReg == nil {
 		m.agentReg = map[string]string{}

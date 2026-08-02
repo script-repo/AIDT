@@ -1379,12 +1379,12 @@ func (m *model) startAgent(a agentDef, act, host string) tea.Cmd {
 		script := m.agentDeployScript(a)
 		if local {
 			if a.name == "Crush" {
-				return localCrushCmd(m.crushConfigJSON(), script, a.name+" deploy", a.name)
+				return localCrushCmd(m.crushConfigJSON(), m.agentOpenCmd(a), script, a.name+" deploy", a.name)
 			}
 			return localDeployAgentCmd(script, a.name, a.name+" deploy")
 		}
 		if a.name == "Crush" {
-			return crushCmd(m.sshUser, host, m.sshPass, m.crushConfigJSON(), script, a.name+" deploy", a.name)
+			return crushCmd(m.sshUser, host, m.sshPass, m.crushConfigJSON(), m.agentOpenCmd(a), script, a.name+" deploy", a.name)
 		}
 		return deployAgentCmd(m.sshUser, host, m.sshPass, script, a.name, a.name+" deploy")
 	}
@@ -1393,7 +1393,7 @@ func (m *model) startAgent(a agentDef, act, host string) tea.Cmd {
 	// handled by openSelectedAgent (fetch inventory → connect picker), never here.
 	if local {
 		if a.name == "Crush" {
-			return localCrushCmd(m.crushConfigJSON(), "", a.name, "")
+			return localCrushCmd(m.crushConfigJSON(), m.agentOpenCmd(a), "", a.name, "")
 		}
 		if config := m.agentConfigScript(a); config != "" {
 			return localConfiguredAgentCmd("set -e\n"+config+m.agentOpenCmd(a)+"\n", a.name)
@@ -1401,7 +1401,7 @@ func (m *model) startAgent(a agentDef, act, host string) tea.Cmd {
 		return localLaunchCmd(m.agentOpenCmd(a), a.name)
 	}
 	if a.name == "Crush" {
-		return crushCmd(m.sshUser, host, m.sshPass, m.crushConfigJSON(), "", a.name, "")
+		return crushCmd(m.sshUser, host, m.sshPass, m.crushConfigJSON(), m.agentOpenCmd(a), "", a.name, "")
 	}
 	if config := m.agentConfigScript(a); config != "" {
 		return configuredAgentCmd(m.sshUser, host, m.sshPass, "set -e\n"+config+m.agentOpenCmd(a)+"\n", a.name)
@@ -1704,6 +1704,32 @@ func parseVMRecord(line string) (name, image, ip string, ok bool) {
 	return rec.Name, rec.Image, rec.IP, true
 }
 
+// serviceInfo is the payload of an "AIDT_SERVICE_INFO <json>" log line, by which
+// a custom setup script reports how its workload should appear in Services.
+type serviceInfo struct {
+	URL    string `json:"url"`
+	Detail string `json:"detail"`
+}
+
+// parseServiceInfo extracts a service record from one line of setup output.
+// A malformed record is ignored rather than failing the deployment: the install
+// itself may have succeeded, and the operator still has the log.
+func parseServiceInfo(line string) (serviceInfo, bool) {
+	const marker = "AIDT_SERVICE_INFO "
+	i := strings.Index(line, marker)
+	if i < 0 {
+		return serviceInfo{}, false
+	}
+	var rec serviceInfo
+	if err := json.Unmarshal([]byte(line[i+len(marker):]), &rec); err != nil {
+		return serviceInfo{}, false
+	}
+	if rec.URL == "" && rec.Detail == "" {
+		return serviceInfo{}, false
+	}
+	return rec, true
+}
+
 func (m model) handleProc(ev ProcEvent) (tea.Model, tea.Cmd) {
 	if ev.Line != "" {
 		m.logLines = append(m.logLines, ev.Line)
@@ -1727,6 +1753,18 @@ func (m model) handleProc(ev ProcEvent) (tea.Model, tea.Cmd) {
 			if m.pendingCustom != nil {
 				m.pendingCustom.target = name
 				m.pendingCustom.url = m.pendingCustom.cfg.accessURL(ip)
+			}
+		}
+		// A setup script can describe its own service. MicroK8s reports the
+		// cluster API endpoint and the MetalLB pool it settled on, neither of
+		// which AIDT can know in advance. This runs after the VM record so it
+		// wins over the generic scheme/port link.
+		if info, ok := parseServiceInfo(ev.Line); ok && m.pendingCustom != nil {
+			if info.URL != "" {
+				m.pendingCustom.url = info.URL
+			}
+			if info.Detail != "" {
+				m.pendingCustom.detail = info.Detail
 			}
 		}
 	}

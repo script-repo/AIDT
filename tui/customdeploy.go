@@ -15,6 +15,12 @@ const (
 	np4mInstall = "curl -fsSL https://raw.githubusercontent.com/script-repo/ntnx-np4m/main/install.sh | sudo bash"
 	nrccInstall = "curl -fsSL https://raw.githubusercontent.com/script-repo/ntnx-console-client/main/install.sh | NRCC_NO_OPEN=1 bash"
 	nrccLegacy  = "curl -fsSL https://raw.githubusercontent.com/script-repo/ntnx-console-client/main/install.sh | bash"
+
+	// microk8sInstall is a bare URL rather than a `curl … | bash` pipeline on
+	// purpose. Both deploy paths download a bare URL to a temp file and execute
+	// that file, so the installer keeps its own stdin — the script drives python3
+	// through a heredoc, which a piped-to-bash script cannot reliably do.
+	microk8sInstall = "https://raw.githubusercontent.com/script-repo/AIDT/main/microk8s-install.sh"
 )
 
 // np4mDebianVenvPreflight works around Debian-family Python installations where
@@ -50,6 +56,9 @@ type customRun struct {
 	cfg    customDeploy
 	target string
 	url    string
+	// detail is populated from an "AIDT_SERVICE_INFO" line emitted by the setup
+	// script, letting a deployment describe itself in the Services menu.
+	detail string
 }
 
 // customItem is a row in the Nutanix "custom deployments" submenu: either the
@@ -115,11 +124,60 @@ func (c customDeploy) accessURL(ip string) string {
 }
 
 // defaultCustomDeploys are the built-in deployment types seeded on first run.
-func defaultCustomDeploys() []customDeploy {
+//
+// MicroK8s carries no Scheme/Port: it exposes a Kubernetes API rather than a
+// web UI, so registering a service link would advertise something an operator
+// cannot usefully open. Access is through the kubeconfig the installer writes.
+func defaultCustomDeploys() []customDeploy { return builtinCustomDeploys() }
+
+// builtinCustomDeploys is the full set of AIDT-provided deployment types. It is
+// the seed list for a fresh install and the source for topping up an existing
+// one (see seedBuiltinCustomDeploys).
+func builtinCustomDeploys() []customDeploy {
 	return []customDeploy{
 		{Name: "NP4M", ScriptURL: np4mInstall, Scheme: "https", Port: "8443"},
 		{Name: "NRCC", ScriptURL: nrccInstall, Scheme: "https", Port: "8443"},
+		{Name: "MicroK8s", ScriptURL: microk8sInstall},
 	}
+}
+
+// seedBuiltinCustomDeploys appends built-in deployment types this install has
+// never been offered, and returns the updated ledger of what it has seen.
+//
+// Recording each built-in separately is what lets a new one (MicroK8s) reach an
+// existing config while still letting a delete stick: the ledger entry survives
+// the delete, so the next launch does not helpfully add it back.
+//
+// legacySeeded covers configs written before the ledger existed — there, the
+// original two built-ins are treated as already offered so a user who deleted
+// them does not get them back on upgrade.
+func seedBuiltinCustomDeploys(in []customDeploy, ledger []string, legacySeeded bool) ([]customDeploy, []string, bool) {
+	seen := map[string]bool{}
+	for _, s := range ledger {
+		seen[s] = true
+	}
+	if legacySeeded && len(ledger) == 0 {
+		seen[np4mInstall] = true
+		seen[nrccInstall] = true
+		seen[nrccLegacy] = true
+	}
+	// Anything already in the list counts as offered, however it got there.
+	for _, c := range in {
+		seen[c.ScriptURL] = true
+	}
+
+	out := append([]customDeploy(nil), in...)
+	changed := false
+	for _, b := range builtinCustomDeploys() {
+		if seen[b.ScriptURL] {
+			continue
+		}
+		out = append(out, b)
+		ledger = append(ledger, b.ScriptURL)
+		seen[b.ScriptURL] = true
+		changed = true
+	}
+	return out, ledger, changed
 }
 
 // migrateBuiltinCustomDeploys adds service metadata to exact built-in entries

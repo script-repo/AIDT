@@ -1,0 +1,136 @@
+#!/bin/sh
+# aidt-skill — the shared skill library every agent checks before installing.
+#
+#   aidt-skill list                 documented skills and their status
+#   aidt-skill show <name>          print a skill's SKILL.md
+#   aidt-skill path <name>          print the skill directory
+#   aidt-skill new <name>           scaffold skills/<name>/SKILL.md
+#   aidt-skill register             rescan skills/ and rebuild REGISTRY.md
+#   aidt-skill check <name>         exit 0 if usable (present, not broken)
+#
+# Adding a skill is how you stop seven agents from installing seven variants of
+# the same tool. Document it, register it, then install it.
+set -eu
+TOOL=aidt-skill
+. "$(dirname "$0")/aidt-common.sh"
+
+SKILLS="$VAULT/skills"
+REGISTRY="$SKILLS/REGISTRY.md"
+TEMPLATE="$SKILLS/TEMPLATE.md"
+
+usage() {
+	sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
+	exit "${1:-0}"
+}
+
+each_skill() { # prints one SKILL.md path per line
+	for d in "$SKILLS"/*/; do
+		[ -f "$d/SKILL.md" ] && printf '%s\n' "$d/SKILL.md"
+	done
+}
+
+rebuild_registry() {
+	[ -f "$REGISTRY" ] || die "missing $REGISTRY"
+	body="$(mktemp)"
+	printf '| Skill | Status | Owner | Summary |\n' >"$body"
+	printf '| --- | --- | --- | --- |\n' >>"$body"
+	found=0
+	each_skill | while IFS= read -r sk; do
+		name="$(fm "$sk" name)"
+		[ -n "$name" ] || name="$(basename "$(dirname "$sk")")"
+		printf '| [%s](%s/SKILL.md) | %s | %s | %s |\n' \
+			"$(md_cell "$name")" \
+			"$(md_cell "$name")" \
+			"$(md_cell "$(fm "$sk" status)")" \
+			"$(md_cell "$(fm "$sk" owner)")" \
+			"$(md_cell "$(fm "$sk" summary)")" >>"$body"
+	done
+	if each_skill | grep -q .; then found=1; fi
+	[ "$found" = 1 ] || printf '| _none documented_ | | | |\n' >>"$body"
+	replace_block "$REGISTRY" "BEGIN AIDT-SKILL-TABLE" "END AIDT-SKILL-TABLE" "$body"
+	rm -f "$body"
+	echo "registered $(each_skill | grep -c . || echo 0) skill(s) in skills/REGISTRY.md"
+}
+
+cmd_list() {
+	found=0
+	each_skill | while IFS= read -r sk; do
+		name="$(fm "$sk" name)"
+		[ -n "$name" ] || name="$(basename "$(dirname "$sk")")"
+		printf '%-22s %-13s %s\n' "$name" "[$(fm "$sk" status)]" "$(fm "$sk" summary)"
+	done
+	if each_skill | grep -q .; then found=1; fi
+	if [ "$found" != 1 ]; then
+		echo "no skills documented yet — 'aidt-skill new <name>' to add the first"
+		return 0
+	fi
+	echo
+	echo "Use what exists. If you must add one: aidt-skill new <name>, fill in"
+	echo "SKILL.md, aidt-skill register, THEN install."
+}
+
+cmd_show() {
+	[ $# -ge 1 ] || die "usage: aidt-skill show <name>"
+	sk="$SKILLS/$1/SKILL.md"
+	[ -f "$sk" ] || die "no such skill: $1 (try: aidt-skill list)"
+	cat "$sk"
+}
+
+cmd_path() {
+	[ $# -ge 1 ] || die "usage: aidt-skill path <name>"
+	[ -d "$SKILLS/$1" ] || die "no such skill: $1"
+	printf '%s\n' "$SKILLS/$1"
+}
+
+cmd_check() {
+	[ $# -ge 1 ] || die "usage: aidt-skill check <name>"
+	sk="$SKILLS/$1/SKILL.md"
+	[ -f "$sk" ] || { echo "missing"; return 1; }
+	st="$(fm "$sk" status)"
+	case "$st" in
+	broken | deprecated) echo "$st"; return 1 ;;
+	esac
+	echo "${st:-undocumented}"
+}
+
+cmd_new() {
+	[ $# -ge 1 ] || die "usage: aidt-skill new <name>"
+	name="$(slug "$1")"
+	[ -n "$name" ] || die "invalid skill name: $1"
+	dir="$SKILLS/$name"
+	[ -e "$dir/SKILL.md" ] && die "skill already exists: $name
+Read it first: aidt-skill show $name"
+	[ -f "$TEMPLATE" ] || die "missing $TEMPLATE"
+	mkdir -p "$dir"
+	today="$(date +%Y-%m-%d)"
+	# A skill nobody has filled in yet is experimental, not stable, and depends
+	# on nothing — the template's placeholder dependency would otherwise make
+	# every task requiring this skill unclaimable.
+	sed -e "s/^name: .*/name: $name/" \
+		-e "s/^status: .*/status: experimental/" \
+		-e "s/^created: .*/created: $today/" \
+		-e "s/^updated: .*/updated: $today/" \
+		-e "s/^owner: .*/owner: ${AIDT_AGENT_ID:-unknown}/" \
+		-e "/^requires:/,/^tags:/{/^  - other-skill$/d;}" \
+		"$TEMPLATE" >"$dir/SKILL.md"
+	echo "created skills/$name/SKILL.md"
+	echo
+	echo "Next: fill in Prerequisites, Usage, and Failure modes, then set"
+	echo "'status: stable' once it actually works. Then run"
+	echo "  aidt-skill register"
+	echo "and only then install anything."
+}
+
+[ $# -ge 1 ] || usage 1
+sub="$1"
+shift
+case "$sub" in
+list) cmd_list "$@" ;;
+show) cmd_show "$@" ;;
+path) cmd_path "$@" ;;
+check) cmd_check "$@" ;;
+new) cmd_new "$@" ;;
+register) rebuild_registry ;;
+-h | --help | help) usage 0 ;;
+*) die "unknown command: $sub (try --help)" ;;
+esac

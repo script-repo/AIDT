@@ -30,6 +30,15 @@ jobs:
         id: tag
         run: |
           git fetch --tags -q
+          # An explicitly tagged commit is an intentional release (e.g. a minor
+          # bump). Auto-incrementing on top of it would publish a second,
+          # identical release, so leave it to the tag-push run.
+          existing="$(git tag --points-at HEAD --list 'v*' | sort -V | tail -n1)"
+          if [ -n "$existing" ]; then
+            echo "HEAD is already tagged $existing; skipping autotag"
+            echo "tag=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           last="$(git tag --list 'v*' | sort -V | tail -n1)"
           if [ -z "$last" ]; then
             next="v0.1.0"
@@ -45,6 +54,7 @@ jobs:
           echo "tag=$next" >> "$GITHUB_OUTPUT"
 
       - name: Create and push tag
+        if: steps.tag.outputs.tag != ''
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -53,7 +63,7 @@ jobs:
 
   goreleaser:
     needs: [autotag]
-    if: always() && (github.ref_type == 'tag' || needs.autotag.result == 'success')
+    if: always() && (github.ref_type == 'tag' || (needs.autotag.result == 'success' && needs.autotag.outputs.tag != ''))
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

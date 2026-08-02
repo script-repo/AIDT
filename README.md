@@ -183,8 +183,8 @@ Open Nutanix, press `c`, and select a definition:
 - Press `w` to choose an existing registered Ollama worker and install the
   workload alongside Ollama using managed SSH access.
 
-NP4M and NRCC are built in and advertise their default HTTPS service on port
-`8443`. When several custom services share a worker, AIDT assigns ports in
+NP4M, NRCC, and MicroK8s are built in. NP4M and NRCC advertise their default
+HTTPS service on port `8443`. When several custom services share a worker, AIDT assigns ports in
 sequence (`8443`, `8444`, `8445`, and so on through `8543`). Redeploying the
 same service reuses its registered port. NP4M and NRCC receive the assigned port
 through their supported installer environment variables. Custom definitions are
@@ -204,8 +204,45 @@ python scripts/nutanix_olla_vm.py pattern-custom \
   --subnet-name "$AIDT_SUBNET_NAME"
 ```
 
+### MicroK8s
+
+The built-in MicroK8s deployment targets **Ubuntu** guests (MicroK8s ships as a
+snap) and installs MicroK8s, Helm, and MetalLB in one pass. Its installer is
+`microk8s-install.sh` at the repository root, fetched by the guest the same way
+the other built-ins fetch theirs.
+
+MetalLB needs a block of addresses on the node's own L2 subnet that nothing else
+answers for. The installer derives the subnet from the node's default route,
+then prefers `x.x.x.81-.85`. If any of those five are taken it searches outward
+from `.81` to the top of the subnet, and only wraps to lower addresses as a last
+resort — staying near the requested range keeps the pool in whatever part of the
+subnet is reserved for statics instead of landing on the DHCP scope.
+
+Availability is tested by pinging each address to force an ARP resolution and
+then checking the neighbour table, so hosts that answer ARP but drop ICMP are
+still detected. Every candidate must stay silent across two passes before it is
+used. This cannot see a powered-off host or a DHCP reservation, so **confirm the
+reported range is excluded from DHCP** before relying on it.
+
+Overrides, set on the deployment definition or in the guest environment:
+
+| Variable | Effect |
+| --- | --- |
+| `AIDT_METALLB_RANGE` | Skip discovery, e.g. `10.0.0.90-10.0.0.94`. |
+| `AIDT_METALLB_START` | Preferred first octet of the window (default `81`). |
+| `AIDT_METALLB_FORCE=1` | Re-enable MetalLB even if it is already on. |
+| `MICROK8S_CHANNEL` | Snap channel (default `stable`). |
+
+The installer writes a kubeconfig to the deploy user's `~/.kube/config`, adds
+that user to the `microk8s` group, and enables `dns` and `helm3`. It reports the
+cluster into Services as `https://<node-ip>:16443` with the MetalLB pool shown
+alongside it. No storage addon is enabled.
+
 After a custom setup command completes successfully, its service URL is saved
-in `~/.ai-deployment-toolkit/tui.json` and appears in Services. Failed installs
+in `~/.ai-deployment-toolkit/tui.json` and appears in Services. A setup script
+can also print `AIDT_SERVICE_INFO {"url":"…","detail":"…"}` to publish an
+endpoint AIDT could not know in advance, which is how MicroK8s reports its API
+address and address pool. Failed installs
 do not register a URL. Gateway and Ollama worker URLs are derived live rather
 than persisted. When Prism inventory is available, the gateway service uses its
 VM name (for example, `aidt-gateway-03`) instead of a generic label.
@@ -306,6 +343,71 @@ at `~/Obsidian/AIDT-Agent-Vault`, so generated notes and project context remain
 available to Obsidian and to the other deployed agents. AIDT stores agent Olla
 provider configuration in mode-`0600` files so credentials are not exposed in
 long-lived SSH command arguments.
+
+## The Shared Agent Vault
+
+Deploying any agent scaffolds `~/Obsidian/AIDT-Agent-Vault` — a shared
+workspace that gives every agent on the host one knowledge base, one skill
+library, one roster, and one work queue.
+
+```text
+AIDT-Agent-Vault/
+├── AGENTS.md          schema: what the vault is and how to maintain it
+├── raw/               immutable sources — read only
+├── wiki/              agent-maintained pages (index, log, concepts,
+│                      entities, sources, comparisons)
+├── skills/            REGISTRY.md + one directory per documented skill
+├── agents/            REGISTRY.md + a capability card per agent
+├── tasks/             QUEUE.md + open/ claimed/ done/ failed/
+├── outputs/           reports and lint results
+└── bin/               aidt-agent, aidt-skill, aidt-task
+```
+
+### Knowledge — the LLM-Wiki pattern
+
+`raw/` and `wiki/` implement Karpathy's LLM Wiki: raw sources are immutable and
+are compiled **once** into interlinked markdown pages, so agents query the wiki
+instead of re-reading sources on every question. `AGENTS.md` is the schema
+layer — page types, YAML frontmatter, `[[wikilink]]` conventions, and the
+ingest / query / lint operations. Agents read it first.
+
+### Skills — check before installing
+
+`skills/REGISTRY.md` indexes every capability already available on the host.
+Seven agents share one machine, so the rule is: look before you install.
+
+```bash
+aidt-skill list              # what already exists
+aidt-skill show <name>       # read it before using it
+aidt-skill new <name>        # scaffold from TEMPLATE.md (status: experimental)
+aidt-skill register          # rebuild REGISTRY.md from every SKILL.md
+```
+
+A skill documents its prerequisites, exact invocation, and failure modes.
+`vault-wiki`, `task-queue`, `agent-registry`, and `olla-pool` ship documented.
+
+### Identity and work
+
+Each deploy registers the agent's card in `agents/<id>.md` with its CLI,
+endpoint, model, and capabilities; `agents/<id>.notes.md` belongs to the agent
+and is never overwritten. Agents launch with `AIDT_AGENT_ID` set and `bin/` on
+`PATH`.
+
+```bash
+aidt-agent whoami / list / show <id>
+aidt-task list --me          # only tasks this agent is eligible for
+aidt-task claim <id>         # atomic: exactly one agent can ever win
+aidt-task done <id> "summary"
+```
+
+Tasks route on `for:` (`any`, an agent id, or `capability:<name>`) and on
+`requires:`, which must name skills present and not `broken` in the registry.
+Claiming is an atomic `mkdir`, so concurrent agents cannot both acquire a task.
+
+Scaffolding is idempotent: documentation and queue state are written only when
+absent, so agent work survives a redeploy, while `bin/` helpers are refreshed
+every time. **The vault is per host** — a gateway vault and a worker vault are
+not synchronized.
 
 ## Runtime State
 

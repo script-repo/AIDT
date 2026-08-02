@@ -290,7 +290,7 @@ func configuredAgentCmd(user, host, pass, script, label string) tea.Cmd {
 // crushCmd writes the Olla provider config to the gateway, then either deploys
 // (uploads + runs the install script) or opens crush. When script != "" it is a
 // deploy (registers the agent on clean exit); otherwise it just launches crush.
-func crushCmd(user, host, pass, config, script, label, agent string) tea.Cmd {
+func crushCmd(user, host, pass, config, open, script, label, agent string) tea.Cmd {
 	return func() tea.Msg {
 		u := orDefault(user, "rocky")
 		if host == "" {
@@ -304,7 +304,7 @@ func crushCmd(user, host, pass, config, script, label, agent string) tea.Cmd {
 		if err := sshMergeCrushConfig(host, u, pass, config); err != nil {
 			return notifyMsg("crush config write failed: " + err.Error())
 		}
-		cmd := loginShell(crushOpenCommand)
+		cmd := open
 		if script != "" {
 			const remotePath = "$HOME/.aidt-deploy.sh"
 			if err := uploadRemoteScript(host, u, pass, remotePath, script); err != nil {
@@ -418,10 +418,14 @@ type tuiSettings struct {
 	AgentHosts    map[string][]string `json:"agent_hosts"` // agent name -> every host it was deployed on
 	Hermes        hermesSettings      `json:"hermes"`
 	Buzz          buzzSettings        `json:"buzz"`
-	CustomDeploys []customDeploy      `json:"custom_deploys"`     // user-defined deployment types
-	CustomSeeded  bool                `json:"custom_seeded"`      // built-in custom deploys seeded once (so deletes stick)
-	Services      []serviceLink       `json:"services,omitempty"` // successfully deployed custom services
-	VMImages      map[string]string   `json:"vm_images"`          // VM name -> source image name
+	CustomDeploys []customDeploy      `json:"custom_deploys"` // user-defined deployment types
+	CustomSeeded  bool                `json:"custom_seeded"`  // built-in custom deploys seeded once (so deletes stick)
+	// SeededBuiltins records the ScriptURL of every built-in deployment this
+	// install has already been offered. A built-in added by a later AIDT release
+	// reaches existing configs exactly once, and deleting it still sticks.
+	SeededBuiltins []string          `json:"seeded_builtins,omitempty"`
+	Services       []serviceLink     `json:"services,omitempty"` // successfully deployed custom services
+	VMImages       map[string]string `json:"vm_images"`          // VM name -> source image name
 }
 
 // buzzSettings persists the operator key and default channel id for the Buzz
@@ -449,6 +453,9 @@ type serviceLink struct {
 	Name   string `json:"name"`
 	Target string `json:"target"`
 	URL    string `json:"url"`
+	// Detail is optional extra context a deployment reports about itself via an
+	// "AIDT_SERVICE_INFO" line — for MicroK8s, its cluster IP and MetalLB pool.
+	Detail string `json:"detail,omitempty"`
 }
 
 // hermesSettings holds the one-time inputs that let Hermes deploys set up the
@@ -636,10 +643,15 @@ func saveDeployPC(path string, d deploySettings, pc pcOverride) error {
 
 // saveCustomDeploys persists the user-defined custom deployment types and marks
 // the built-in defaults as seeded (so deleting them all doesn't re-add them).
-func saveCustomDeploys(path string, cds []customDeploy) error {
+func saveCustomDeploys(path string, cds []customDeploy, seededBuiltins ...[]string) error {
 	s := loadSettings(path)
 	s.CustomDeploys = cds
 	s.CustomSeeded = true
+	// Variadic so the common call sites (add/delete a definition) stay unchanged
+	// and simply preserve the existing ledger.
+	if len(seededBuiltins) > 0 {
+		s.SeededBuiltins = seededBuiltins[0]
+	}
 	return saveSettings(path, s)
 }
 

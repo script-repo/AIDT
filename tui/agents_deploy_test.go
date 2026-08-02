@@ -74,12 +74,15 @@ func TestCrushDeployScriptShellSyntax(t *testing.T) {
 }
 
 func TestCrushOpensInObsidianVault(t *testing.T) {
+	m := newModel("http://10.0.0.1:40114", "rocky", "pw")
+	m.tokFile = filepath.Join(t.TempDir(), "tui.json")
+	cmd := m.agentOpenCmd(mustAgent(t, "Crush"))
 	for _, want := range []string{
 		`mkdir -p "$HOME/Obsidian/AIDT-Agent-Vault/.obsidian"`,
 		`cd "$HOME/Obsidian/AIDT-Agent-Vault"`,
 		"exec crush",
 	} {
-		if !strings.Contains(crushOpenCommand, want) {
+		if !strings.Contains(cmd, want) {
 			t.Errorf("Crush launch command missing %q", want)
 		}
 	}

@@ -18,6 +18,7 @@ type serviceItem struct {
 	target string
 	url    string
 	kind   string
+	detail string // extra context the deployment reported about itself
 }
 
 func (i serviceItem) Title() string { return i.name }
@@ -26,7 +27,11 @@ func (i serviceItem) Description() string {
 	if i.target != "" {
 		where += " on " + i.target
 	}
-	return where + " · " + i.url
+	desc := where + " · " + i.url
+	if i.detail != "" {
+		desc += " · " + i.detail
+	}
+	return desc
 }
 func (i serviceItem) FilterValue() string { return i.name + " " + i.target + " " + i.url }
 
@@ -66,7 +71,7 @@ func (m *model) refreshServices() {
 		})
 	}
 	for _, s := range m.services {
-		add(serviceItem{name: s.Name, target: s.Target, url: s.URL, kind: "custom service"})
+		add(serviceItem{name: s.Name, target: s.Target, url: s.URL, kind: "custom service", detail: s.Detail})
 	}
 	m.servicesList.SetItems(items)
 }
@@ -112,7 +117,7 @@ func (m *model) recordCustomService(run customRun) {
 	if !validServiceURL(run.url) {
 		return
 	}
-	link := serviceLink{Name: run.cfg.Name, Target: run.target, URL: run.url}
+	link := serviceLink{Name: run.cfg.Name, Target: run.target, URL: run.url, Detail: run.detail}
 	found := false
 	for i := range m.services {
 		if m.services[i].Name == link.Name && m.services[i].Target == link.Target {

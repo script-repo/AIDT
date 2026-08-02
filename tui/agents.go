@@ -22,6 +22,10 @@ type agentDef struct {
 	target     string // placement summary shown in the Agents list
 	endpoint   string // how it reaches models (informational)
 	desc       string
+	// capabilities is the agent's advertised skill set in the shared vault.
+	// Task queue entries tagged `for: capability:<name>` route on these, so the
+	// vocabulary is deliberately small — see skills/agent-registry/SKILL.md.
+	capabilities []string
 }
 
 // depsBootstrap installs the prerequisites the npm/Node agents need on
@@ -241,70 +245,73 @@ echo "[deploy] Crush ready: $CRUSH_BIN"
 echo "[deploy] Open Crush from Agents (enter/o)."
 `
 
-// crushOpenCommand keeps Crush in the managed Obsidian vault instead of the
-// directory AIDT happened to be launched from.
-const crushOpenCommand = `mkdir -p "$HOME/Obsidian/AIDT-Agent-Vault/.obsidian" && cd "$HOME/Obsidian/AIDT-Agent-Vault" && exec crush`
-
 // agentCatalog is the set of agents offered in the Agents section.
 //
 // All agents deploy to the gateway, one worker, or every selected worker and
 // reach models through the Olla gateway, which load-balances the whole pool.
 var agentCatalog = []agentDef{
 	{
-		name:       "Crush",
-		cli:        "crush",
-		deployable: true,
-		target:     "gateway / worker",
-		endpoint:   "Olla OpenAI endpoint (whole pool)",
-		desc:       "Charm coding agent",
+		name:         "Crush",
+		cli:          "crush",
+		deployable:   true,
+		target:       "gateway / worker",
+		endpoint:     "Olla OpenAI endpoint (whole pool)",
+		desc:         "Charm coding agent",
+		capabilities: []string{"code", "knowledge", "shell"},
 	},
 	{
-		name:       "OpenCode",
-		cli:        "opencode",
-		deployable: true,
-		target:     "gateway / worker",
-		endpoint:   "Olla OpenAI endpoint (whole pool)",
-		desc:       "Open-source coding agent",
+		name:         "OpenCode",
+		cli:          "opencode",
+		deployable:   true,
+		target:       "gateway / worker",
+		endpoint:     "Olla OpenAI endpoint (whole pool)",
+		desc:         "Open-source coding agent",
+		capabilities: []string{"code", "knowledge", "shell", "serve"},
 	},
 	{
-		name:       "Goose",
-		cli:        "goose session",
-		deployable: true,
-		target:     "gateway / worker",
-		endpoint:   "Olla OpenAI endpoint (whole pool)",
-		desc:       "AAIF open-source AI agent",
+		name:         "Goose",
+		cli:          "goose session",
+		deployable:   true,
+		target:       "gateway / worker",
+		endpoint:     "Olla OpenAI endpoint (whole pool)",
+		desc:         "AAIF open-source AI agent",
+		capabilities: []string{"code", "knowledge", "shell"},
 	},
 	{
-		name:       "Grok Build",
-		cli:        "grok",
-		deployable: true,
-		target:     "gateway / worker",
-		endpoint:   "Olla OpenAI endpoint (whole pool)",
-		desc:       "xAI terminal coding agent",
+		name:         "Grok Build",
+		cli:          "grok",
+		deployable:   true,
+		target:       "gateway / worker",
+		endpoint:     "Olla OpenAI endpoint (whole pool)",
+		desc:         "xAI terminal coding agent",
+		capabilities: []string{"code", "knowledge", "shell"},
 	},
 	{
-		name:       "Claude Code",
-		cli:        "claude",
-		deployable: true,
-		target:     "gateway / worker",
-		endpoint:   "Olla Anthropic endpoint (whole pool)",
-		desc:       "Anthropic coding agent",
+		name:         "Claude Code",
+		cli:          "claude",
+		deployable:   true,
+		target:       "gateway / worker",
+		endpoint:     "Olla Anthropic endpoint (whole pool)",
+		desc:         "Anthropic coding agent",
+		capabilities: []string{"code", "knowledge", "shell"},
 	},
 	{
-		name:       "Codex",
-		cli:        "codex",
-		deployable: true,
-		target:     "gateway / worker",
-		endpoint:   "Olla OpenAI endpoint (whole pool)",
-		desc:       "OpenAI terminal coding agent",
+		name:         "Codex",
+		cli:          "codex",
+		deployable:   true,
+		target:       "gateway / worker",
+		endpoint:     "Olla OpenAI endpoint (whole pool)",
+		desc:         "OpenAI terminal coding agent",
+		capabilities: []string{"code", "knowledge", "shell"},
 	},
 	{
-		name:       "Hermes",
-		cli:        "hermes",
-		deployable: true,
-		target:     "gateway / worker",
-		endpoint:   "Olla OpenAI endpoint (whole pool)",
-		desc:       "Nous Research self-improving agent",
+		name:         "Hermes",
+		cli:          "hermes",
+		deployable:   true,
+		target:       "gateway / worker",
+		endpoint:     "Olla OpenAI endpoint (whole pool)",
+		desc:         "Nous Research self-improving agent",
+		capabilities: []string{"code", "knowledge", "shell", "chat", "serve"},
 	},
 }
 
@@ -527,16 +534,23 @@ echo "[deploy] openclaw: $(command -v openclaw)"
 // Headless deploys exit 0 after install so the TUI can register the agent —
 // they do NOT exec the interactive CLI (that caused exit 127 when the binary
 // was missing/off-PATH and blocked registration).
+// agentDeployScript is the full install: the agent itself, then its
+// registration in the shared vault so the other agents on this host can see
+// what it is and the task queue can route work to it.
 func (m *model) agentDeployScript(a agentDef) string {
+	return m.agentDeployScriptBody(a) + m.agentRegisterScript(a)
+}
+
+func (m *model) agentDeployScriptBody(a agentDef) string {
 	if a.name == "Crush" {
-		return "set -e\n" + obsidianBootstrap + strings.TrimPrefix(crushDeployScript, "set -e\n")
+		return "set -e\n" + vaultSetup() + strings.TrimPrefix(crushDeployScript, "set -e\n")
 	}
 	model := m.effDefaultModel()
 	gateway := a.name == "Hermes" && m.hermesGatewayWanted()
 
 	var b strings.Builder
 	b.WriteString("set -e\n")
-	b.WriteString(obsidianBootstrap)
+	b.WriteString(vaultSetup())
 	b.WriteString(depsBootstrap)
 	if a.name == "Hermes" {
 		b.WriteString("export HERMES_NONINTERACTIVE=1\n")
@@ -553,7 +567,7 @@ func (m *model) agentDeployScript(a agentDef) string {
 	if a.name == "OpenCode" {
 		b.Reset()
 		b.WriteString("set -e\n")
-		b.WriteString(obsidianBootstrap)
+		b.WriteString(vaultSetup())
 		b.WriteString(cliDepsBootstrap)
 		b.WriteString(openCodeInstallFragment)
 		b.WriteString(m.agentConfigScript(a))
@@ -564,7 +578,7 @@ func (m *model) agentDeployScript(a agentDef) string {
 	if a.name == "Goose" {
 		b.Reset()
 		b.WriteString("set -e\n")
-		b.WriteString(obsidianBootstrap)
+		b.WriteString(vaultSetup())
 		b.WriteString(cliDepsBootstrap)
 		b.WriteString(gooseInstallFragment)
 		b.WriteString(m.agentConfigScript(a))
@@ -574,7 +588,7 @@ func (m *model) agentDeployScript(a agentDef) string {
 	if a.name == "Grok Build" {
 		b.Reset()
 		b.WriteString("set -e\n")
-		b.WriteString(obsidianBootstrap)
+		b.WriteString(vaultSetup())
 		b.WriteString(cliDepsBootstrap)
 		b.WriteString(grokInstallFragment)
 		b.WriteString(m.agentConfigScript(a))
@@ -584,7 +598,7 @@ func (m *model) agentDeployScript(a agentDef) string {
 	if a.name == "Claude Code" {
 		b.Reset()
 		b.WriteString("set -e\n")
-		b.WriteString(obsidianBootstrap)
+		b.WriteString(vaultSetup())
 		b.WriteString(cliDepsBootstrap)
 		b.WriteString(claudeCodeInstallFragment)
 		b.WriteString(m.agentConfigScript(a))
@@ -594,7 +608,7 @@ func (m *model) agentDeployScript(a agentDef) string {
 	if a.name == "Codex" {
 		b.Reset()
 		b.WriteString("set -e\n")
-		b.WriteString(obsidianBootstrap)
+		b.WriteString(vaultSetup())
 		b.WriteString(cliDepsBootstrap)
 		b.WriteString(codexInstallFragment)
 		b.WriteString(m.agentConfigScript(a))
@@ -1023,12 +1037,21 @@ echo "[remove] Codex removed (user settings kept in ~/.codex)"
 // AIDT-owned mode-0600 files keep credentials out of long-lived ssh argv.
 func (m *model) agentOpenCmd(a agentDef) string {
 	model := m.effDefaultModel()
-	workspace := `mkdir -p "$HOME/Obsidian/AIDT-Agent-Vault/.obsidian" && cd "$HOME/Obsidian/AIDT-Agent-Vault" && `
+	// Enter the shared vault with the agent's identity and the aidt-* helpers on
+	// PATH, so it can answer "who am I" and claim queue work without setup.
+	// Double quotes here on purpose: loginShell wraps the whole command in a
+	// single-quoted `bash -lc '…'`, so single quotes would come out escaped as
+	// '\''…'\''. agentID only ever emits [a-z0-9-], so this stays unambiguous.
+	workspace := fmt.Sprintf(`export AIDT_AGENT_VAULT="$HOME/Obsidian/AIDT-Agent-Vault"; `+
+		`export AIDT_AGENT_ID="%s"; export PATH="$AIDT_AGENT_VAULT/bin:$PATH"; `+
+		`mkdir -p "$HOME/Obsidian/AIDT-Agent-Vault/.obsidian" && `+
+		`cd "$HOME/Obsidian/AIDT-Agent-Vault" && `,
+		shSingle(agentID(a.name)))
 
 	var cmd string
 	switch a.name {
 	case "Crush":
-		cmd = crushOpenCommand
+		cmd = workspace + "exec crush"
 	case "OpenCode":
 		cmd = fmt.Sprintf("export OPENCODE_CONFIG=\"$HOME/.config/aidt/opencode.json\"; %sexec opencode", workspace)
 	case "Goose":
