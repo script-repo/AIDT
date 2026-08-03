@@ -134,7 +134,7 @@ func TestBuiltinCatalogIsWellFormed(t *testing.T) {
 
 		// Every built-in must produce a runnable script.
 		d := appDeployment{App: a.Name, Context: "c", Namespace: a.defaultNamespace(), Release: "r", Kind: a.kind()}
-		if _, err := appDeployScript(a, d, nil); err != nil {
+		if _, err := appDeployScript(a, d, nil, ollaTarget{}); err != nil {
 			t.Errorf("%s does not produce a deploy script: %v", a.Name, err)
 		}
 		if _, err := appRemoveScript(a, d); err != nil {

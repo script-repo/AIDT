@@ -186,7 +186,7 @@ func TestDeleteAppKeepsDeployments(t *testing.T) {
 func TestAppDeployScriptHelm(t *testing.T) {
 	a := k8sApp{Name: "Web", Repo: "https://charts.example.com", Chart: "web", Version: "1.2.3", Values: "a=1, b=2"}
 	d := appDeployment{App: "Web", Context: "prod", Namespace: "ai", Release: "web", Kind: appKindHelm}
-	got, err := appDeployScript(a, d, nil)
+	got, err := appDeployScript(a, d, nil, ollaTarget{})
 	if err != nil {
 		t.Fatalf("appDeployScript: %v", err)
 	}
@@ -210,7 +210,7 @@ func TestAppDeployScriptHelm(t *testing.T) {
 func TestAppDeployScriptPublishesPrimaryService(t *testing.T) {
 	a := k8sApp{Name: "Web", Repo: "https://r", Chart: "web"}
 	d := appDeployment{App: "Web", Context: "prod", Namespace: "ai", Release: "web", Kind: appKindHelm}
-	got, err := appDeployScript(a, d, nil)
+	got, err := appDeployScript(a, d, nil, ollaTarget{})
 	if err != nil {
 		t.Fatalf("appDeployScript: %v", err)
 	}
@@ -233,7 +233,7 @@ func TestAppDeployScriptPublishesPrimaryService(t *testing.T) {
 	// A manifest install has no values at all and must still be published.
 	mo := k8sApp{Name: "Thing", ManifestURL: "https://example.com/app.yaml"}
 	md := appDeployment{App: "Thing", Context: "prod", Namespace: "ops", Release: "thing", Kind: appKindManifest}
-	mGot, err := appDeployScript(mo, md, nil)
+	mGot, err := appDeployScript(mo, md, nil, ollaTarget{})
 	if err != nil {
 		t.Fatalf("appDeployScript(manifest): %v", err)
 	}
@@ -249,7 +249,7 @@ func TestAppDeployScriptSurvivesTheExposePatchOnUpgrade(t *testing.T) {
 	// redeploy of a published app fails until helm is told to take ownership.
 	a := k8sApp{Name: "Web", Repo: "https://r", Chart: "web"}
 	d := appDeployment{App: "Web", Context: "prod", Namespace: "ai", Release: "web", Kind: appKindHelm}
-	got, err := appDeployScript(a, d, nil)
+	got, err := appDeployScript(a, d, nil, ollaTarget{})
 	if err != nil {
 		t.Fatalf("appDeployScript: %v", err)
 	}
@@ -270,10 +270,10 @@ func TestAppDeployScriptKeepsTheNodePortStable(t *testing.T) {
 	// helm reclaims .spec.type on upgrade, dropping the node port allocation.
 	// Re-publishing without asking for the old port hands out a fresh random
 	// one, so the app's URL changes on every redeploy — and an app configured
-	// with that URL (Paperclip's publicURL) then rejects its own traffic.
+	// with that URL then rejects its own traffic.
 	a := k8sApp{Name: "Web", Repo: "https://r", Chart: "web"}
 	d := appDeployment{App: "Web", Context: "prod", Namespace: "ai", Release: "web", Kind: appKindHelm}
-	got, err := appDeployScript(a, d, nil)
+	got, err := appDeployScript(a, d, nil, ollaTarget{})
 	if err != nil {
 		t.Fatalf("appDeployScript: %v", err)
 	}
@@ -298,10 +298,134 @@ func TestAppDeployScriptKeepsTheNodePortStable(t *testing.T) {
 	}
 }
 
+func TestOllaEnvSurfaces(t *testing.T) {
+	gw := ollaTarget{Gateway: "http://10.0.0.5:40114", Token: "tok", Model: "m1"}
+
+	openai := ollaEnv(ollaOpenAI, gw.Gateway, gw.Token, gw.Model)
+	if openai["OPENAI_BASE_URL"] != "http://10.0.0.5:40114/olla/openai/v1" {
+		t.Errorf("OPENAI_BASE_URL = %q", openai["OPENAI_BASE_URL"])
+	}
+	if _, ok := openai["ANTHROPIC_BASE_URL"]; ok {
+		t.Error("openai mode leaked the anthropic surface")
+	}
+
+	anth := ollaEnv(ollaAnthropic, gw.Gateway, gw.Token, gw.Model)
+	if anth["ANTHROPIC_BASE_URL"] != "http://10.0.0.5:40114/olla/anthropic" {
+		t.Errorf("ANTHROPIC_BASE_URL = %q", anth["ANTHROPIC_BASE_URL"])
+	}
+	if _, ok := anth["OPENAI_BASE_URL"]; ok {
+		t.Error("anthropic mode leaked the openai surface")
+	}
+
+	both := ollaEnv(ollaBoth, gw.Gateway, gw.Token, gw.Model)
+	for _, k := range []string{"OPENAI_BASE_URL", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL"} {
+		if both[k] == "" {
+			t.Errorf("both mode missing %s", k)
+		}
+	}
+	// A trailing slash on the gateway must not double up in the path.
+	if got := ollaEnv(ollaOpenAI, "http://h:1/", "t", "")["OPENAI_BASE_URL"]; got != "http://h:1/olla/openai/v1" {
+		t.Errorf("trailing slash mishandled: %q", got)
+	}
+	// No gateway means nothing to inject rather than a broken base URL.
+	if len(ollaEnv(ollaBoth, "", "t", "m")) != 0 {
+		t.Error("env was built with no gateway")
+	}
+}
+
+func TestOllaIsOptInPerApp(t *testing.T) {
+	// Injecting OPENAI_BASE_URL into Grafana or a database operator is noise at
+	// best, so it is off unless an app asks for it.
+	if (k8sApp{}).ollaMode() != "" {
+		t.Error("Olla injection is on by default")
+	}
+	want := map[string]string{
+		"Open WebUI": ollaOpenAI, "LiteLLM": ollaOpenAI, "AnythingLLM": ollaOpenAI,
+		"Langfuse": ollaOpenAI, "LangGraph": ollaBoth,
+	}
+	off := map[string]bool{"Grafana": true, "CloudNativePG": true, "Redis": true, "Qdrant": true, "n8n": true}
+	for _, a := range builtinApps() {
+		if w, ok := want[a.Name]; ok && a.ollaMode() != w {
+			t.Errorf("%s olla mode = %q, want %q", a.Name, a.ollaMode(), w)
+		}
+		if off[a.Name] && a.ollaMode() != "" {
+			t.Errorf("%s should not receive Olla env", a.Name)
+		}
+	}
+}
+
+func TestAppDeployScriptInjectsOllaAndSelfURL(t *testing.T) {
+	a := k8sApp{
+		Name: "Web", Repo: "https://r", Chart: "web",
+		Olla: ollaOpenAI, SelfURLValue: "config.publicURL",
+		Env: map[string]string{"BETTER_AUTH_URL": "${SELF_URL}"},
+	}
+	d := appDeployment{App: "Web", Context: "prod", Namespace: "ai", Release: "web", Kind: appKindHelm}
+	got, err := appDeployScript(a, d, nil, ollaTarget{Gateway: "http://10.0.0.5:40114", Token: "tok", Model: "m1"})
+	if err != nil {
+		t.Fatalf("appDeployScript: %v", err)
+	}
+
+	// The address has to be known before helm runs, or the app has to be
+	// deployed, inspected and deployed again — the manual loop this removes.
+	if strings.Index(got, "AIDT_SELF_URL=") > strings.Index(got, "helm upgrade --install") {
+		t.Error("the app's own URL is computed after it is installed")
+	}
+	if !strings.Contains(got, "config.publicURL") {
+		t.Errorf("self URL not passed as a chart value:\n%s", got)
+	}
+	if !strings.Contains(got, "set env") || !strings.Contains(got, "OPENAI_BASE_URL") {
+		t.Errorf("Olla env not injected:\n%s", got)
+	}
+	// ${SELF_URL} must reach the shell as an expansion, not a literal.
+	if strings.Contains(got, `BETTER_AUTH_URL=${SELF_URL}`) {
+		t.Errorf("SELF_URL was not expanded:\n%s", got)
+	}
+	if !strings.Contains(got, "AIDT_SELF_URL") {
+		t.Errorf("no reference to the planned URL:\n%s", got)
+	}
+	// An app given no Olla mode gets no LLM env at all.
+	plain, _ := appDeployScript(k8sApp{Name: "P", Repo: "https://r", Chart: "p"}, d, nil,
+		ollaTarget{Gateway: "http://10.0.0.5:40114", Token: "t"})
+	if strings.Contains(plain, "OPENAI_BASE_URL") {
+		t.Errorf("Olla env injected into an app that did not ask:\n%s", plain)
+	}
+}
+
+func TestSelfURLRequiresPublishing(t *testing.T) {
+	// The URL is the node address plus the published port; without publishing
+	// there is no address to hand the app, and silently deploying a
+	// misconfigured instance is worse than refusing.
+	a := k8sApp{Name: "W", Repo: "https://r", Chart: "w", SelfURLValue: "config.publicURL", Expose: exposeNone}
+	d := appDeployment{App: "W", Context: "c", Namespace: "n", Release: "w", Kind: appKindHelm}
+	if _, err := appDeployScript(a, d, nil, ollaTarget{}); err == nil {
+		t.Error("an app needing its own URL was accepted without publishing")
+	}
+}
+
+func TestPostDeployNeverFailsTheDeploy(t *testing.T) {
+	a := k8sApp{
+		Name: "W", Repo: "https://r", Chart: "w",
+		PostDeploy: []string{"echo one", "false"},
+	}
+	d := appDeployment{App: "W", Context: "prod", Namespace: "ai", Release: "w", Kind: appKindHelm}
+	got, err := appDeployScript(a, d, nil, ollaTarget{})
+	if err != nil {
+		t.Fatalf("appDeployScript: %v", err)
+	}
+	if !strings.Contains(got, "AIDT_POST_RUN") {
+		t.Errorf("post-deploy steps are not announced:\n%s", got)
+	}
+	// The install already succeeded; a failing setup command must not undo it.
+	if !strings.Contains(got, "continuing") {
+		t.Errorf("a failing post-deploy command can fail the deploy:\n%s", got)
+	}
+}
+
 func TestAppDeployScriptRespectsExposeNone(t *testing.T) {
 	a := k8sApp{Name: "Op", Repo: "https://r", Chart: "op", Expose: exposeNone}
 	d := appDeployment{App: "Op", Context: "prod", Namespace: "data", Release: "op", Kind: appKindHelm}
-	got, err := appDeployScript(a, d, nil)
+	got, err := appDeployScript(a, d, nil, ollaTarget{})
 	if err != nil {
 		t.Fatalf("appDeployScript: %v", err)
 	}
@@ -413,11 +537,11 @@ func TestGenerateSecretIsRandomAndSized(t *testing.T) {
 
 func TestEnsureAppSecretsAreStableAcrossRedeploys(t *testing.T) {
 	m := testAppModel(t)
-	a := k8sApp{Name: "Paperclip", Repo: "https://r", Chart: "paperclip", Secrets: []appSecret{
+	a := k8sApp{Name: "Stateful", Repo: "https://r", Chart: "stateful", Secrets: []appSecret{
 		{Path: "postgresql.auth.password", Bytes: 24},
 		{Path: "auth.betterAuthSecret", Bytes: 32},
 	}}
-	d := appDeployment{App: "Paperclip", Context: "prod", Namespace: "ai", Release: "paperclip", Kind: appKindHelm}
+	d := appDeployment{App: "Stateful", Context: "prod", Namespace: "ai", Release: "stateful", Kind: appKindHelm}
 
 	first, err := m.ensureAppSecrets(a, d)
 	if err != nil {
@@ -470,13 +594,13 @@ func TestEnsureAppSecretsAreStableAcrossRedeploys(t *testing.T) {
 }
 
 func TestAppDeployScriptKeepsSecretsOutOfArgv(t *testing.T) {
-	a := k8sApp{Name: "Paperclip", Repo: "https://r", Chart: "paperclip", Secrets: []appSecret{
+	a := k8sApp{Name: "Stateful", Repo: "https://r", Chart: "stateful", Secrets: []appSecret{
 		{Path: "postgresql.auth.password"},
 	}}
-	d := appDeployment{App: "Paperclip", Context: "prod", Namespace: "ai", Release: "paperclip", Kind: appKindHelm}
+	d := appDeployment{App: "Stateful", Context: "prod", Namespace: "ai", Release: "stateful", Kind: appKindHelm}
 	secrets := map[string]string{"postgresql.auth.password": "s3cr3tvalue"}
 
-	got, err := appDeployScript(a, d, secrets)
+	got, err := appDeployScript(a, d, secrets, ollaTarget{})
 	if err != nil {
 		t.Fatalf("appDeployScript: %v", err)
 	}
@@ -500,40 +624,15 @@ func TestAppDeployScriptKeepsSecretsOutOfArgv(t *testing.T) {
 	// configuration error rather than something to silently ignore.
 	mo := k8sApp{Name: "M", ManifestURL: "https://e/x.yaml", Secrets: []appSecret{{Path: "a.b"}}}
 	md := appDeployment{App: "M", Context: "c", Namespace: "n", Release: "r", Kind: appKindManifest}
-	if _, err := appDeployScript(mo, md, map[string]string{"a.b": "v"}); err == nil {
+	if _, err := appDeployScript(mo, md, map[string]string{"a.b": "v"}, ollaTarget{}); err == nil {
 		t.Error("secrets on a manifest install were accepted")
-	}
-}
-
-func TestPaperclipBuiltinDeclaresItsSecrets(t *testing.T) {
-	var pc k8sApp
-	for _, a := range builtinApps() {
-		if a.Name == "Paperclip" {
-			pc = a
-		}
-	}
-	if pc.Name == "" {
-		t.Fatal("Paperclip is not in the catalog")
-	}
-	// Without both of these the chart deploys and then fails: PostgreSQL will
-	// not initialise with an empty password, and BetterAuth needs a 32-char key.
-	want := map[string]bool{"postgresql.auth.password": false, "auth.betterAuthSecret": false}
-	for _, s := range pc.Secrets {
-		if _, ok := want[s.Path]; ok {
-			want[s.Path] = true
-		}
-	}
-	for path, found := range want {
-		if !found {
-			t.Errorf("Paperclip does not declare %s", path)
-		}
 	}
 }
 
 func TestAppDeployScriptOCISkipsRepoAdd(t *testing.T) {
 	a := k8sApp{Name: "n8n", Chart: "oci://reg.example.com/library/n8n"}
 	d := appDeployment{App: "n8n", Context: "prod", Namespace: "ops", Release: "n8n", Kind: appKindHelm}
-	got, err := appDeployScript(a, d, nil)
+	got, err := appDeployScript(a, d, nil, ollaTarget{})
 	if err != nil {
 		t.Fatalf("appDeployScript: %v", err)
 	}
@@ -548,7 +647,7 @@ func TestAppDeployScriptOCISkipsRepoAdd(t *testing.T) {
 func TestAppDeployScriptManifest(t *testing.T) {
 	a := k8sApp{Name: "Thing", ManifestURL: "https://example.com/app.yaml"}
 	d := appDeployment{App: "Thing", Context: "prod", Namespace: "ops", Release: "thing", Kind: appKindManifest}
-	got, err := appDeployScript(a, d, nil)
+	got, err := appDeployScript(a, d, nil, ollaTarget{})
 	if err != nil {
 		t.Fatalf("appDeployScript: %v", err)
 	}
@@ -572,14 +671,14 @@ func TestAppDeployScriptManifest(t *testing.T) {
 
 func TestAppDeployScriptRejectsIncomplete(t *testing.T) {
 	d := appDeployment{App: "X", Context: "prod", Namespace: "ai", Release: "x"}
-	if _, err := appDeployScript(k8sApp{Name: "X"}, d, nil); err == nil {
+	if _, err := appDeployScript(k8sApp{Name: "X"}, d, nil, ollaTarget{}); err == nil {
 		t.Error("an app with no chart and no manifest was accepted")
 	}
-	if _, err := appDeployScript(k8sApp{Name: "X", Chart: "c"}, appDeployment{Context: "prod"}, nil); err == nil {
+	if _, err := appDeployScript(k8sApp{Name: "X", Chart: "c"}, appDeployment{Context: "prod"}, nil, ollaTarget{}); err == nil {
 		t.Error("a deployment with no namespace was accepted")
 	}
 	// A non-OCI chart with no repository cannot be resolved.
-	if _, err := appDeployScript(k8sApp{Name: "X", Chart: "c"}, d, nil); err == nil {
+	if _, err := appDeployScript(k8sApp{Name: "X", Chart: "c"}, d, nil, ollaTarget{}); err == nil {
 		t.Error("a bare chart name with no repo was accepted")
 	}
 }

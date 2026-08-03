@@ -475,18 +475,35 @@ They reach Helm through a `umask 077` values file rather than `--set`: the
 deploy script itself travels over stdin, but a `--set` would put the secret into
 helm's own argv, where any other user on the gateway could read it out of `ps`.
 
-Paperclip is the built-in that needs this. Its chart's values promise to
-auto-generate a PostgreSQL password and a BetterAuth key when left empty, but it
-writes empty strings — PostgreSQL then exits with *"Database is uninitialized
-and superuser password is not specified"* and the app's `wait-for-postgres` init
-container blocks behind it forever.
+None of the built-ins currently need this — they all install and run on their
+own — but a chart that demands a password with no usable default can declare
+one rather than being deployed and then repaired by hand.
 
-> **Paperclip after deploy:** the app enforces a hostname allowlist and answers
-> `403` on an address it has not been told about. Add `config.publicURL` to its
-> Values, set to the URL shown in App Services — for example
-> `image.repository=ghcr.io/paperclipai/paperclip,config.publicURL=http://10.0.0.5:31586`
-> — and redeploy. The node port is preserved across redeploys, so the URL you
-> configure stays correct.
+### Pointing an app at the Olla pool
+
+An application can declare that it wants the gateway's Olla endpoints, and they
+are injected into its workload after every deploy:
+
+| Mode | Injected |
+| --- | --- |
+| `openai` | `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_MODEL` |
+| `anthropic` | `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL` |
+| `both` | all of the above |
+
+Off unless an app asks for it: `OPENAI_BASE_URL` means nothing to Grafana or a
+database operator. Open WebUI, LiteLLM, AnythingLLM and Langfuse ship on
+`openai`; LangGraph on `both`.
+
+This is done by setting environment on the workload after install, because
+charts routinely provide no way to set arbitrary environment and the address of
+an LLM gateway cannot be expressed any other way. Like the publish step it
+re-applies on every deploy, so a `helm upgrade` that drops it self-corrects.
+
+An app can also declare `SelfURLValue`, a chart value that should receive its
+own external URL. Because the node port is chosen *before* helm runs, that URL
+is known at install time — an app that has to be told its own address is
+configured correctly on the first deploy rather than needing to be deployed,
+inspected and deployed again.
 
 Built-in applications are seeded on first launch and topped up when a later AIDT
 release adds one, using the same ledger as the custom deployments — so deleting

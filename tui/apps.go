@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/url"
 	"sort"
 	"strings"
 
@@ -50,10 +51,34 @@ type k8sApp struct {
 
 	// Secrets are chart values that must be set to a generated random string at
 	// deploy time. Charts that promise to auto-generate a password do not
-	// always deliver one — the Paperclip chart writes an empty string, and its
-	// PostgreSQL then refuses to initialise — and a value hardcoded in this
+	// always deliver one — some write an empty string, and the database they
+	// front then refuses to initialise — and a value hardcoded in this
 	// catalogue would be identical on every AIDT install.
 	Secrets []appSecret `json:"secrets,omitempty"`
+
+	// Olla injects the gateway's Olla endpoints into the app after deploy, so a
+	// workload that wants an LLM finds the pool AIDT already runs instead of
+	// having to be pointed at it by hand. "openai", "anthropic", "both", or
+	// empty for none.
+	//
+	// Off by default: OPENAI_BASE_URL means nothing to Grafana or PostgreSQL,
+	// and setting it everywhere would be noise at best.
+	Olla string `json:"olla,omitempty"`
+
+	// SelfURLValue is a chart value that must receive the app's own external
+	// URL. Some apps reject traffic on an address they were not told about,
+	// which without this needs a deploy, a look-up and a second deploy.
+	SelfURLValue string `json:"self_url_value,omitempty"`
+
+	// Env is injected into the app's Deployment after install, for charts that
+	// expose no way to set environment variables. ${SELF_URL} expands to the
+	// app's external URL.
+	Env map[string]string `json:"env,omitempty"`
+
+	// PostDeploy are commands run inside the app's container after a successful
+	// install, for first-run setup a chart cannot do. ${SELF_URL} expands.
+	// Failures are reported but never fail the deploy.
+	PostDeploy []string `json:"post_deploy,omitempty"`
 
 	// Expose controls whether the primary Service is published on a NodePort
 	// after deploying, so the app is reachable from App Services. Empty means
@@ -74,6 +99,55 @@ type appSecret struct {
 }
 
 const defaultSecretBytes = 24
+
+// Olla injection modes.
+const (
+	ollaOpenAI    = "openai"
+	ollaAnthropic = "anthropic"
+	ollaBoth      = "both"
+)
+
+// ollaMode reports which Olla endpoints this app wants injected.
+func (a k8sApp) ollaMode() string {
+	switch strings.ToLower(strings.TrimSpace(a.Olla)) {
+	case ollaOpenAI:
+		return ollaOpenAI
+	case ollaAnthropic:
+		return ollaAnthropic
+	case ollaBoth:
+		return ollaBoth
+	}
+	return ""
+}
+
+// ollaEnv builds the environment an app needs to reach the Olla gateway.
+//
+// Both surfaces are offered because the workloads that want them differ: an
+// OpenAI-compatible client wants OPENAI_BASE_URL, while agent runtimes built
+// against Claude read the ANTHROPIC_* set. Olla serves both from one gateway.
+func ollaEnv(mode, gateway, token, model string) map[string]string {
+	base := strings.TrimRight(gateway, "/")
+	if base == "" {
+		return nil
+	}
+	out := map[string]string{}
+	if mode == ollaOpenAI || mode == ollaBoth {
+		out["OPENAI_BASE_URL"] = base + "/olla/openai/v1"
+		out["OPENAI_API_KEY"] = token
+	}
+	if mode == ollaAnthropic || mode == ollaBoth {
+		out["ANTHROPIC_BASE_URL"] = base + "/olla/anthropic"
+		out["ANTHROPIC_API_KEY"] = token
+		out["ANTHROPIC_AUTH_TOKEN"] = token
+		if model != "" {
+			out["ANTHROPIC_MODEL"] = model
+		}
+	}
+	if model != "" {
+		out["OPENAI_MODEL"] = model
+	}
+	return out
+}
 
 // expose modes.
 const (
@@ -302,47 +376,39 @@ func (d appDeployment) label() string {
 // Bitnami is deliberately absent. Broadcom deleted the public Bitnami image
 // catalog in 2025, so those charts install and then fail to pull; PostgreSQL is
 // served by CloudNativePG and Redis by the ot-container-kit operator instead.
+//
+// Paperclip was removed: the only community chart here, at v0.1.0, and it
+// needed a compensating value or workaround at every step — empty generated
+// secrets, an image published to a registry the chart did not name, a hostname
+// allowlist, and first-run setup a chart cannot do. Every other entry resolves
+// against an upstream that installs and runs on its own.
 func builtinApps() []k8sApp {
 	return []k8sApp{
 		// --- AI serving stack ---
 		{
 			Name: "Open WebUI", Desc: "chat UI for the Olla pool",
 			Repo: "https://helm.openwebui.com", Chart: "open-webui", Namespace: "ai",
+			Olla: ollaOpenAI,
 		},
 		{
 			Name: "LiteLLM", Desc: "OpenAI-compatible proxy / router",
 			Chart: "oci://ghcr.io/berriai/litellm-helm", Namespace: "ai",
+			Olla: ollaOpenAI,
 		},
 		{
 			Name: "Langfuse", Desc: "LLM tracing & evaluation",
 			Repo: "https://langfuse.github.io/langfuse-k8s", Chart: "langfuse", Namespace: "ai",
+			Olla: ollaOpenAI,
 		},
 		{
 			Name: "AnythingLLM", Desc: "private document chat & RAG",
 			Repo: "https://mintplex-labs.github.io/helm-charts", Chart: "anythingllm", Namespace: "ai",
+			Olla: ollaOpenAI,
 		},
 		{
 			Name: "LangGraph", Desc: "agent runtime (LangGraph Platform)",
 			Repo: "https://langchain-ai.github.io/helm", Chart: "langgraph-cloud", Namespace: "ai",
-		},
-		{
-			// The chart's values promise to auto-generate these when left empty,
-			// but it writes empty strings instead: PostgreSQL then exits with
-			// "Database is uninitialized and superuser password is not
-			// specified", and the app's wait-for-postgres init container blocks
-			// forever behind it. AIDT supplies them per install.
-			//
-			// The chart also defaults image.repository to "paperclipai/paperclip"
-			// on Docker Hub, which was never published there — the pull fails with
-			// ImagePullBackOff. The image is on GHCR, so point at it.
-			Name: "Paperclip", Desc: "AI agent orchestration platform",
-			Repo: "https://ileonelperea.github.io/paperclip-helm", Chart: "paperclip", Namespace: "ai",
-			Values: "image.repository=ghcr.io/paperclipai/paperclip",
-			Secrets: []appSecret{
-				{Path: "postgresql.auth.password", Bytes: 24},
-				// BetterAuth requires at least 32 characters; hex doubles this.
-				{Path: "auth.betterAuthSecret", Bytes: 32},
-			},
+			Olla: ollaBoth,
 		},
 
 		// --- data services ---
@@ -555,6 +621,23 @@ func (m *model) selectedAppItem() (appItem, bool) {
 
 // ---- deploy / remove --------------------------------------------------------
 
+// ollaTarget describes the pool a deployed app should be pointed at.
+//
+// The gateway URL is normalised to scheme://host:port: an app runs inside the
+// cluster and needs a routable address, not whatever path the TUI happens to
+// be connected on.
+func (m *model) ollaTarget() ollaTarget {
+	gw := ""
+	if u, err := url.Parse(strings.TrimSpace(m.gateway)); err == nil && u.Host != "" {
+		scheme := u.Scheme
+		if scheme == "" {
+			scheme = "http"
+		}
+		gw = scheme + "://" + u.Host
+	}
+	return ollaTarget{Gateway: gw, Token: m.token, Model: m.effDefaultModel()}
+}
+
 // appPreflight returns the gateway address to run cluster commands on, or an
 // error explaining what is missing. Both the deploy and remove paths need the
 // same three things, so they ask once here.
@@ -663,7 +746,7 @@ func (m *model) startAppDeploy(a k8sApp, d appDeployment) tea.Cmd {
 		m.notice = err.Error()
 		return nil
 	}
-	script, err := appDeployScript(a, d, secrets)
+	script, err := appDeployScript(a, d, secrets, m.ollaTarget())
 	if err != nil {
 		m.notice = err.Error()
 		return nil

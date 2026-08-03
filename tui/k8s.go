@@ -255,7 +255,7 @@ func repoSlug(repo string) string {
 // Helm runs as `upgrade --install` so redeploying an app that is already there
 // converges instead of failing, which is what makes the d key safe to press
 // twice. Manifests are applied rather than created for the same reason.
-func appDeployScript(a k8sApp, d appDeployment, secrets map[string]string) (string, error) {
+func appDeployScript(a k8sApp, d appDeployment, secrets map[string]string, gw ollaTarget) (string, error) {
 	ns, ctx := strings.TrimSpace(d.Namespace), strings.TrimSpace(d.Context)
 	if ns == "" || ctx == "" {
 		return "", errors.New("context and namespace are required")
@@ -272,7 +272,7 @@ func appDeployScript(a k8sApp, d appDeployment, secrets map[string]string) (stri
 	// with it (Paperclip's publicURL rejects requests on an address it does
 	// not expect, so the app would break itself on redeploy).
 	if a.exposeMode() == exposeNodePort {
-		b.WriteString(capturePortsFragment(ctx, ns, d.Release))
+		b.WriteString(planFragment(ctx, ns, d.Release))
 	}
 
 	// Generated secrets travel in a values file rather than on the command
@@ -338,6 +338,15 @@ fi
 		if valsFile != "" {
 			args = append(args, "-f", `"`+valsFile+`"`)
 		}
+		// Hand the app its own address at install time. Doing this here rather
+		// than after the fact is what makes an app like Paperclip work on the
+		// first deploy instead of needing to be reconfigured and redeployed.
+		if p := strings.TrimSpace(a.SelfURLValue); p != "" {
+			if a.exposeMode() != exposeNodePort {
+				return "", errors.New("an app that needs its own URL must be published; set Expose to nodeport")
+			}
+			args = append(args, `${AIDT_SELF_URL:+--set `+shSingle(p)+`="$AIDT_SELF_URL"}`)
+		}
 		for i, s := range a.valuesArgs() {
 			// valuesArgs alternates "--set", "k=v"; only the value needs quoting.
 			if i%2 == 0 {
@@ -362,6 +371,12 @@ fi
 	if a.exposeMode() == exposeNodePort {
 		b.WriteString(exposeFragment(ctx, ns, d.Release))
 	}
+	if env := a.deployEnv(gw); len(env) > 0 {
+		b.WriteString(envFragment(ctx, ns, d.Release, env))
+	}
+	if len(a.PostDeploy) > 0 {
+		b.WriteString(postDeployFragment(ctx, ns, d.Release, a.PostDeploy))
+	}
 	b.WriteString("echo " + q("AIDT_APP_DEPLOYED "+a.Name) + "\n")
 	b.WriteString("kubectl --context " + q(ctx) + " --namespace " + q(ns) + " get all 2>&1 | head -20 || true\n")
 	return b.String(), nil
@@ -383,15 +398,44 @@ fi
 // Only the primary Service is touched. Exposing everything a release creates
 // would publish its dependencies too — an Open WebUI install alone would put
 // Redis and an Ollama API on every node address with no authentication.
-// capturePortsFragment records the node ports a previous deploy assigned, so
-// the re-publish below can ask for the same ones instead of taking whatever
-// Kubernetes hands out next. It runs before helm.
-func capturePortsFragment(ctx, ns, release string) string {
+// planFragment works out, before helm runs, where the app will be reachable.
+//
+// Deciding the node port up front is what removes the manual step from the
+// deploy: an app that has to be told its own address (Paperclip refuses
+// requests on a host its publicURL does not name) can be handed that address as
+// a chart value on the very first install, instead of being deployed once,
+// inspected, reconfigured and deployed again.
+//
+// The port comes from the previous deploy when there was one, so the URL is
+// stable, and otherwise from the first free port in the NodePort range.
+func planFragment(ctx, ns, release string) string {
 	q := func(s string) string { return "'" + shSingle(s) + "'" }
 	return `
-# --- remember the node ports already in use, so the URL is stable ---
+# --- work out where this app will be reachable, before installing it ---
+AIDT_X_NODE=$(kubectl --context ` + q(ctx) + ` get nodes \
+  -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null || true)
 AIDT_X_KEEP=$(kubectl --context ` + q(ctx) + ` -n ` + q(ns) + ` get svc ` + q(release) + ` \
   -o jsonpath='{range .spec.ports[*]}{.port}:{.nodePort},{end}' 2>/dev/null || true)
+
+# Reuse the port this app already had; otherwise take the lowest free one.
+AIDT_X_PORT=$(printf '%s' "${AIDT_X_KEEP:-}" | awk -F, '{
+  for (i = 1; i <= NF; i++) {
+    if ($i == "") continue
+    split($i, a, ":")
+    if (a[2] != "" && a[2] != "0") { print a[2]; exit }
+  }
+}')
+if [ -z "$AIDT_X_PORT" ]; then
+  AIDT_X_PORT=$(kubectl --context ` + q(ctx) + ` get svc -A \
+    -o jsonpath='{range .items[*]}{range .spec.ports[*]}{.nodePort}{"\n"}{end}{end}' 2>/dev/null \
+    | awk 'NF{used[$1]=1} END{for (p = 30000; p <= 32767; p++) if (!(p in used)) {print p; exit}}')
+fi
+if [ -n "$AIDT_X_NODE" ] && [ -n "$AIDT_X_PORT" ]; then
+  AIDT_SELF_URL="http://$AIDT_X_NODE:$AIDT_X_PORT"
+else
+  AIDT_SELF_URL=""
+fi
+echo "AIDT_PLANNED_URL ${AIDT_SELF_URL:-unknown}"
 `
 }
 
@@ -427,17 +471,32 @@ aidt_expose() {
     return 0
   fi
 
-  # Ask for the node ports this service had before helm reset it, so the URL
-  # an operator saved (or configured into the app) keeps working. The strategic
-  # merge key for Service.spec.ports is "port", so naming each one is enough.
-  local keep patch
-  keep=$(printf '%s' "${AIDT_X_KEEP:-}" | awk -F, '{
-    for (i = 1; i <= NF; i++) {
-      if ($i == "") continue
-      split($i, a, ":")
-      if (a[2] != "" && a[2] != "0") printf "%s{\"port\":%s,\"nodePort\":%s}", (n++ ? "," : ""), a[1], a[2]
+  # Ask for the port this app was planned onto, so the URL it was configured
+  # with at install time is the one it actually answers on. Ports carried over
+  # from a previous deploy win; the first unassigned port takes the planned one.
+  # The strategic merge key for Service.spec.ports is "port".
+  local svcports keep patch
+  svcports=$(kubectl --context "$AIDT_X_CTX" -n "$AIDT_X_NS" get svc "$name" \
+    -o jsonpath='{range .spec.ports[*]}{.port},{end}' 2>/dev/null)
+  keep=$(printf '%s' "$svcports" | awk -F, -v prev="${AIDT_X_KEEP:-}" -v want="${AIDT_X_PORT:-}" '
+    BEGIN {
+      n = split(prev, pairs, ",")
+      for (i = 1; i <= n; i++) {
+        if (pairs[i] == "") continue
+        split(pairs[i], a, ":")
+        if (a[2] != "" && a[2] != "0") old[a[1]] = a[2]
+      }
     }
-  }')
+    {
+      for (i = 1; i <= NF; i++) {
+        p = $i
+        if (p == "") continue
+        np = ""
+        if (p in old) np = old[p]
+        else if (want != "" && !usedwant) { np = want; usedwant = 1 }
+        if (np != "") printf "%s{\"port\":%s,\"nodePort\":%s}", (c++ ? "," : ""), p, np
+      }
+    }')
   if [ -n "$keep" ]; then
     patch="{\"spec\":{\"type\":\"NodePort\",\"ports\":[$keep]}}"
   else
@@ -492,6 +551,134 @@ func appRemoveScript(a k8sApp, d appDeployment) (string, error) {
 	}
 	b.WriteString("echo " + q("AIDT_APP_REMOVED "+d.App) + "\n")
 	return b.String(), nil
+}
+
+// ollaTarget is what an app needs to reach the Olla gateway.
+type ollaTarget struct {
+	Gateway string // e.g. http://10.0.0.5:40114
+	Token   string
+	Model   string
+}
+
+// deployEnv is everything injected into the app's Deployment after install:
+// the Olla endpoints it asked for, plus any explicit Env it declares.
+func (a k8sApp) deployEnv(gw ollaTarget) map[string]string {
+	out := map[string]string{}
+	if mode := a.ollaMode(); mode != "" {
+		for k, v := range ollaEnv(mode, gw.Gateway, gw.Token, gw.Model) {
+			out[k] = v
+		}
+	}
+	// An explicit Env wins: it is the operator's own override.
+	for k, v := range a.Env {
+		out[k] = v
+	}
+	return out
+}
+
+// envFragment sets environment variables on the app's Deployment.
+//
+// This exists because charts routinely provide no way to set arbitrary
+// environment — the Paperclip chart has no env, extraEnv or envFrom value at
+// all — and the endpoint of an LLM gateway cannot be expressed any other way.
+// Like the publish step it re-applies on every deploy, so a helm upgrade that
+// drops it is corrected immediately rather than leaving the app unwired.
+func envFragment(ctx, ns, release string, env map[string]string) string {
+	q := func(s string) string { return "'" + shSingle(s) + "'" }
+	keys := make([]string, 0, len(env))
+	for k := range env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	var pairs strings.Builder
+	for _, k := range keys {
+		// ${SELF_URL} is expanded by the shell from the planned address.
+		v := strings.ReplaceAll(env[k], "${SELF_URL}", `'"${AIDT_SELF_URL}"'`)
+		pairs.WriteString(" " + q(k) + "=" + q(v))
+	}
+
+	return `
+# --- point the app at what it needs ---
+# Charts pick either kind for the same workload — Open WebUI ships a
+# StatefulSet, most others a Deployment — so both are searched. Looking only
+# for a Deployment would silently skip the injection for half the catalogue.
+AIDT_X_DEPLOY=""
+for AIDT_X_KIND in deploy statefulset; do
+  AIDT_X_FOUND=$(kubectl --context ` + q(ctx) + ` -n ` + q(ns) + ` get "$AIDT_X_KIND" \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null \
+    | awk -v rel=` + q(release) + ` '$0==rel {print; found=1; exit} NF {n++; last=$0} END {if (!found && n==1) print last}')
+  if [ -n "$AIDT_X_FOUND" ]; then
+    AIDT_X_DEPLOY="$AIDT_X_KIND/$AIDT_X_FOUND"
+    break
+  fi
+done
+if [ -z "$AIDT_X_DEPLOY" ]; then
+  echo "AIDT_ENV_SKIP - no deployment could be identified"
+else
+  # Setting env starts a rollout. The default RollingUpdate brings the new pod
+  # up before retiring the old one, which deadlocks forever when the app holds
+  # a ReadWriteOnce volume — only one pod can mount it. Switch those to
+  # Recreate so the replacement can actually start; without this the new
+  # environment never reaches a running container.
+  AIDT_X_PVC=$(kubectl --context ` + q(ctx) + ` -n ` + q(ns) + ` get "$AIDT_X_DEPLOY" \
+    -o jsonpath='{.spec.template.spec.volumes[*].persistentVolumeClaim.claimName}' 2>/dev/null || true)
+  if [ -n "$AIDT_X_PVC" ]; then
+    kubectl --context ` + q(ctx) + ` -n ` + q(ns) + ` patch "$AIDT_X_DEPLOY" \
+      -p '{"spec":{"strategy":{"rollingUpdate":null,"type":"Recreate"}}}' >/dev/null 2>&1 || true
+  fi
+  if kubectl --context ` + q(ctx) + ` -n ` + q(ns) + ` set env "$AIDT_X_DEPLOY"` + pairs.String() + ` >/dev/null 2>&1; then
+    echo "AIDT_ENV_SET $AIDT_X_DEPLOY"
+  else
+    echo "AIDT_ENV_SKIP $AIDT_X_DEPLOY could not be updated"
+  fi
+  # Never fatal: the install has already succeeded, and a slow rollout must not
+  # stop the first-run setup below from running.
+  kubectl --context ` + q(ctx) + ` -n ` + q(ns) + ` rollout status "$AIDT_X_DEPLOY" \
+    --timeout=5m >/dev/null 2>&1 || echo "AIDT_ENV_NOTE rollout still in progress"
+fi
+`
+}
+
+// postDeployFragment runs an app's first-run setup inside its own container.
+//
+// Charts install software; they do not onboard it. Paperclip ships a CLI that
+// has to create an instance config and mint the first admin invite before
+// anyone can log in, and without this that is a manual step against a running
+// pod. Failures are reported and never fail a deploy that already succeeded.
+func postDeployFragment(ctx, ns, release string, cmds []string) string {
+	q := func(s string) string { return "'" + shSingle(s) + "'" }
+	var b strings.Builder
+	b.WriteString(`
+# --- first-run setup inside the app container ---
+AIDT_X_POD=$(kubectl --context ` + q(ctx) + ` -n ` + q(ns) + ` get pod \
+  -l app.kubernetes.io/name=` + q(release) + ` --field-selector=status.phase=Running \
+  -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+if [ -z "$AIDT_X_POD" ]; then
+  AIDT_X_POD=$(kubectl --context ` + q(ctx) + ` -n ` + q(ns) + ` get pod --field-selector=status.phase=Running \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null | grep "^` + shSingle(release) + `" | head -1)
+fi
+if [ -z "$AIDT_X_POD" ]; then
+  echo "AIDT_POST_SKIP - no running pod found"
+else
+`)
+	for _, c := range cmds {
+		cmd := strings.ReplaceAll(c, "${SELF_URL}", `'"${AIDT_SELF_URL}"'`)
+		b.WriteString(`  echo "AIDT_POST_RUN ` + shSingle(firstWords(c)) + `"
+  kubectl --context ` + q(ctx) + ` -n ` + q(ns) + ` exec "$AIDT_X_POD" -- sh -c ` + q(cmd) + ` 2>&1 | sed 's/^/    /' || echo "    (command reported an error; continuing)"
+`)
+	}
+	b.WriteString("fi\n")
+	return b.String()
+}
+
+// firstWords trims a command to something readable in the deploy log.
+func firstWords(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) > 60 {
+		return s[:57] + "…"
+	}
+	return s
 }
 
 // ---- reconciling the registry against the clusters --------------------------
