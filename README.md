@@ -437,6 +437,16 @@ may use `service.type`, `server.service.type`, or no such key at all — and a
 also works for manifest installs, which take no values. It is re-applied on
 every deploy, so a `helm upgrade` that resets the type is corrected immediately.
 
+Patching makes kubectl the field manager for `.spec.type`, which Helm 4's
+server-side apply would otherwise refuse on the next upgrade
+(`conflict with "kubectl-patch" using v1: .spec.type`), so the upgrade passes
+`--force-conflicts` where the installed Helm supports it. Helm reclaiming the
+field drops the node port allocation, so the ports assigned by the previous
+deploy are recorded beforehand and requested again — **the URL is stable across
+redeploys**, which matters for any app configured with its own address. If a
+remembered port has been taken in the meantime, the app is published on a fresh
+one rather than left unreachable.
+
 Rows are coloured by state: grey when the app is deployed nowhere, green once it
 is installed, and amber when a recorded installation was not found in its
 cluster at the last refresh. Deploying the same app to another context — or to
@@ -472,9 +482,11 @@ and superuser password is not specified"* and the app's `wait-for-postgres` init
 container blocks behind it forever.
 
 > **Paperclip after deploy:** the app enforces a hostname allowlist and answers
-> `403` on an address it has not been told about. Set `publicURL` in its Values
-> to the URL shown in App Services — for example
-> `publicURL=http://10.0.0.5:31586` — and redeploy.
+> `403` on an address it has not been told about. Add `config.publicURL` to its
+> Values, set to the URL shown in App Services — for example
+> `image.repository=ghcr.io/paperclipai/paperclip,config.publicURL=http://10.0.0.5:31586`
+> — and redeploy. The node port is preserved across redeploys, so the URL you
+> configure stays correct.
 
 Built-in applications are seeded on first launch and topped up when a later AIDT
 release adds one, using the same ledger as the custom deployments — so deleting

@@ -242,6 +242,62 @@ func TestAppDeployScriptPublishesPrimaryService(t *testing.T) {
 	}
 }
 
+func TestAppDeployScriptSurvivesTheExposePatchOnUpgrade(t *testing.T) {
+	// Publishing a Service with kubectl patch makes kubectl the field manager
+	// for .spec.type. Helm 4's server-side apply then refuses the next upgrade
+	// with "conflict with kubectl-patch using v1: .spec.type", so every
+	// redeploy of a published app fails until helm is told to take ownership.
+	a := k8sApp{Name: "Web", Repo: "https://r", Chart: "web"}
+	d := appDeployment{App: "Web", Context: "prod", Namespace: "ai", Release: "web", Kind: appKindHelm}
+	got, err := appDeployScript(a, d, nil)
+	if err != nil {
+		t.Fatalf("appDeployScript: %v", err)
+	}
+	if !strings.Contains(got, "$AIDT_HELM_FORCE") {
+		t.Errorf("upgrade cannot reclaim ownership of a patched field:\n%s", got)
+	}
+	// Helm 3 has no such flag, and passing it unconditionally would break every
+	// deploy on a gateway that already had helm 3 installed.
+	if !strings.Contains(got, "grep -q -- '--force-conflicts'") {
+		t.Errorf("the flag is not guarded by a support check:\n%s", got)
+	}
+	if strings.Index(got, `AIDT_HELM_FORCE=""`) > strings.Index(got, "helm upgrade --install") {
+		t.Error("the guard runs after the upgrade that needs it")
+	}
+}
+
+func TestAppDeployScriptKeepsTheNodePortStable(t *testing.T) {
+	// helm reclaims .spec.type on upgrade, dropping the node port allocation.
+	// Re-publishing without asking for the old port hands out a fresh random
+	// one, so the app's URL changes on every redeploy — and an app configured
+	// with that URL (Paperclip's publicURL) then rejects its own traffic.
+	a := k8sApp{Name: "Web", Repo: "https://r", Chart: "web"}
+	d := appDeployment{App: "Web", Context: "prod", Namespace: "ai", Release: "web", Kind: appKindHelm}
+	got, err := appDeployScript(a, d, nil)
+	if err != nil {
+		t.Fatalf("appDeployScript: %v", err)
+	}
+	if !strings.Contains(got, "AIDT_X_KEEP=") {
+		t.Errorf("existing node ports are never recorded:\n%s", got)
+	}
+	// The capture has to happen before helm resets the service.
+	if strings.Index(got, "AIDT_X_KEEP=") > strings.Index(got, "helm upgrade --install") {
+		t.Error("node ports are captured after helm has already reset them")
+	}
+	if !strings.Contains(got, `\"nodePort\":`) {
+		t.Errorf("the patch never requests a specific node port:\n%s", got)
+	}
+	// A remembered port can be taken by something else by the time we ask for
+	// it; publishing on a fresh port beats not publishing at all.
+	if !strings.Contains(got, "(new port)") {
+		t.Errorf("no fallback when the remembered port is unavailable:\n%s", got)
+	}
+	// A never-before-deployed app has nothing to remember and must still work.
+	if !strings.Contains(got, `patch='{"spec":{"type":"NodePort"}}'`) {
+		t.Errorf("first install has no unqualified patch path:\n%s", got)
+	}
+}
+
 func TestAppDeployScriptRespectsExposeNone(t *testing.T) {
 	a := k8sApp{Name: "Op", Repo: "https://r", Chart: "op", Expose: exposeNone}
 	d := appDeployment{App: "Op", Context: "prod", Namespace: "data", Release: "op", Kind: appKindHelm}
@@ -496,8 +552,16 @@ func TestAppDeployScriptManifest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("appDeployScript: %v", err)
 	}
-	if strings.Contains(got, "helm ") {
-		t.Errorf("manifest deploy should not invoke helm:\n%s", got)
+	// Check for an actual invocation rather than the word: the publish step's
+	// comments legitimately mention helm.
+	for _, line := range strings.Split(got, "\n") {
+		code := strings.TrimSpace(line)
+		if strings.HasPrefix(code, "#") {
+			continue
+		}
+		if strings.HasPrefix(code, "helm ") || strings.Contains(code, "; helm ") {
+			t.Errorf("manifest deploy invokes helm: %q", code)
+		}
 	}
 	for _, want := range []string{"create namespace 'ops'", "apply -f 'https://example.com/app.yaml'"} {
 		if !strings.Contains(got, want) {

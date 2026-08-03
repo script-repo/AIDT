@@ -265,6 +265,16 @@ func appDeployScript(a k8sApp, d appDeployment, secrets map[string]string) (stri
 	var b strings.Builder
 	b.WriteString(k8sToolPrefix)
 
+	// Record the node ports already assigned before helm runs. Helm reclaims
+	// .spec.type on upgrade, which drops the allocation, and the re-publish
+	// below would otherwise be handed a fresh random port on every deploy —
+	// changing the app's URL each time and invalidating anything configured
+	// with it (Paperclip's publicURL rejects requests on an address it does
+	// not expect, so the app would break itself on redeploy).
+	if a.exposeMode() == exposeNodePort {
+		b.WriteString(capturePortsFragment(ctx, ns, d.Release))
+	}
+
 	// Generated secrets travel in a values file rather than on the command
 	// line. The script itself reaches the host over stdin, but a `--set` would
 	// put the secret into helm's own argv, where any other user on the box can
@@ -294,6 +304,17 @@ cat > "$AIDT_VALS" <<'AIDT_VALUES_EOF'
 	switch a.kind() {
 	case appKindHelm:
 		b.WriteString(helmInstallFragment)
+		// Publishing a Service with `kubectl patch` makes kubectl the field
+		// manager for .spec.type, and Helm 4's server-side apply then refuses
+		// the next upgrade with "conflict with kubectl-patch using v1:
+		// .spec.type" — every redeploy of a published app would fail. Let helm
+		// take ownership back; the publish step re-applies afterwards either
+		// way. The flag is Helm 4 only, so it is added only when supported.
+		b.WriteString(`AIDT_HELM_FORCE=""
+if helm upgrade --help 2>/dev/null | grep -q -- '--force-conflicts'; then
+  AIDT_HELM_FORCE="--force-conflicts"
+fi
+`)
 		chart := a.Chart
 		if !a.isOCI() {
 			if a.Repo == "" {
@@ -307,7 +328,7 @@ cat > "$AIDT_VALS" <<'AIDT_VALUES_EOF'
 		args := []string{
 			"helm", "upgrade", "--install", q(d.Release), q(chart),
 			"--kube-context", q(ctx), "--namespace", q(ns), "--create-namespace",
-			"--wait", "--timeout", "10m",
+			"--wait", "--timeout", "10m", "$AIDT_HELM_FORCE",
 		}
 		if v := strings.TrimSpace(a.Version); v != "" {
 			args = append(args, "--version", q(v))
@@ -362,6 +383,18 @@ cat > "$AIDT_VALS" <<'AIDT_VALUES_EOF'
 // Only the primary Service is touched. Exposing everything a release creates
 // would publish its dependencies too — an Open WebUI install alone would put
 // Redis and an Ollama API on every node address with no authentication.
+// capturePortsFragment records the node ports a previous deploy assigned, so
+// the re-publish below can ask for the same ones instead of taking whatever
+// Kubernetes hands out next. It runs before helm.
+func capturePortsFragment(ctx, ns, release string) string {
+	q := func(s string) string { return "'" + shSingle(s) + "'" }
+	return `
+# --- remember the node ports already in use, so the URL is stable ---
+AIDT_X_KEEP=$(kubectl --context ` + q(ctx) + ` -n ` + q(ns) + ` get svc ` + q(release) + ` \
+  -o jsonpath='{range .spec.ports[*]}{.port}:{.nodePort},{end}' 2>/dev/null || true)
+`
+}
+
 func exposeFragment(ctx, ns, release string) string {
 	q := func(s string) string { return "'" + shSingle(s) + "'" }
 	return `
@@ -387,11 +420,37 @@ aidt_expose() {
   set -- $target; name=$1; type=$2; cip=$3
   if [ "$cip" = "None" ]; then
     echo "AIDT_EXPOSE_SKIP $name headless service cannot be published"
-  elif [ "$type" != "ClusterIP" ]; then
+    return 0
+  fi
+  if [ "$type" != "ClusterIP" ]; then
     echo "AIDT_EXPOSE_SKIP $name already $type"
+    return 0
+  fi
+
+  # Ask for the node ports this service had before helm reset it, so the URL
+  # an operator saved (or configured into the app) keeps working. The strategic
+  # merge key for Service.spec.ports is "port", so naming each one is enough.
+  local keep patch
+  keep=$(printf '%s' "${AIDT_X_KEEP:-}" | awk -F, '{
+    for (i = 1; i <= NF; i++) {
+      if ($i == "") continue
+      split($i, a, ":")
+      if (a[2] != "" && a[2] != "0") printf "%s{\"port\":%s,\"nodePort\":%s}", (n++ ? "," : ""), a[1], a[2]
+    }
+  }')
+  if [ -n "$keep" ]; then
+    patch="{\"spec\":{\"type\":\"NodePort\",\"ports\":[$keep]}}"
+  else
+    patch='{"spec":{"type":"NodePort"}}'
+  fi
+
+  if kubectl --context "$AIDT_X_CTX" -n "$AIDT_X_NS" patch svc "$name" -p "$patch" >/dev/null 2>&1; then
+    echo "AIDT_EXPOSED $name"
   elif kubectl --context "$AIDT_X_CTX" -n "$AIDT_X_NS" patch svc "$name" \
         -p '{"spec":{"type":"NodePort"}}' >/dev/null 2>&1; then
-    echo "AIDT_EXPOSED $name"
+    # The remembered port can be taken by something else in the meantime;
+    # publishing on a fresh port beats not publishing at all.
+    echo "AIDT_EXPOSED $name (new port)"
   else
     echo "AIDT_EXPOSE_SKIP $name patch to NodePort failed"
   fi
