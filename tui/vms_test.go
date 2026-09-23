@@ -28,26 +28,44 @@ func TestCustomNamedWorkerAppearsInNutanixList(t *testing.T) {
 		{Name: "unrelated-db", IP: "10.0.0.9", Role: vmRole("unrelated-db")},
 	}
 
-	// Before the pool is known, the freely named worker is indistinguishable
-	// from any other VM in Prism.
-	m.refreshVMs()
-	if _, ok := vmRows(&m)["bigrig"]; ok {
-		t.Fatal("precondition: bigrig should not be classifiable before pool membership is known")
-	}
-
-	// Once it is registered with Olla, it is ours.
+	// Once it is registered with Olla, it is ours — and convention-named VMs
+	// that are also in the pool still show.
 	m.endpoints = []endpointEntry{{Name: "bigrig", URL: "http://10.0.0.3:11434"}}
 	m.refreshVMs()
 	rows := vmRows(&m)
 	if rows["bigrig"] != "worker" {
 		t.Errorf("registered worker with a custom name: role = %q, want \"worker\"", rows["bigrig"])
 	}
-	// The conventional VMs keep working, and unrelated Prism VMs stay hidden.
-	if rows["aidt-worker-01"] != "worker" || rows["aidt-gateway-01"] != "gateway" {
-		t.Errorf("conventional roles regressed: %+v", rows)
+	if rows["aidt-gateway-01"] != "gateway" {
+		t.Errorf("connected gateway missing: %+v", rows)
+	}
+	// Convention-named but NOT in the live pool must stay hidden (retired).
+	if _, ok := rows["aidt-worker-01"]; ok {
+		t.Error("retired convention-named worker leaked into the managed list")
 	}
 	if _, ok := rows["unrelated-db"]; ok {
 		t.Error("an unrelated Prism VM leaked into the managed list")
+	}
+}
+
+// A retired aidt-worker-* VM still sitting in Prism must leave the managed list
+// as soon as it is gone from the gateway pool.
+func TestRetiredConventionWorkerHiddenWhenPoolKnown(t *testing.T) {
+	m := newModel("http://10.0.0.1:40114", "rocky", "pw")
+	m.tokFile = filepath.Join(t.TempDir(), "tui.json")
+	m.vms = []VM{
+		{Name: "aidt-gateway-01", IP: "10.0.0.1", Role: vmRole("aidt-gateway-01")},
+		{Name: "aidt-worker-99", IP: "10.0.0.99", Role: vmRole("aidt-worker-99")},
+		{Name: "aidt-worker-01", IP: "10.0.0.2", Role: vmRole("aidt-worker-01")},
+	}
+	m.endpoints = []endpointEntry{{Name: "aidt-worker-01", URL: "http://10.0.0.2:11434"}}
+	m.refreshVMs()
+	rows := vmRows(&m)
+	if rows["aidt-worker-01"] != "worker" || rows["aidt-gateway-01"] != "gateway" {
+		t.Fatalf("active pool members missing: %+v", rows)
+	}
+	if _, ok := rows["aidt-worker-99"]; ok {
+		t.Fatal("retired aidt-worker-99 must not appear once the pool is known")
 	}
 }
 

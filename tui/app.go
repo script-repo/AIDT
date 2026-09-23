@@ -439,6 +439,8 @@ func newModel(gateway, sshUser, sshPass string) model {
 	sshPass = orDefault(sshPass, st.SSHPass)
 
 	// Prism Central comes from the persisted override when set, else mcp.json.
+	// An MCP API key is only merged when the override has no key and no password,
+	// so a verified password is never shadowed by a stale MCP key.
 	pcCfg := pcConfigFromOverride(st.PC)
 	if pcCfg == nil {
 		pcCfg = LoadPCConfig()

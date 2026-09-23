@@ -27,13 +27,27 @@ type PCConfig struct {
 // authHeader sets the appropriate auth header on a PC request: the API key when
 // present, otherwise HTTP basic auth from the user/password service account.
 func (c *PCConfig) authHeader(req *http.Request) {
-	if strings.TrimSpace(c.APIKey) != "" {
+	c.applyAuth(req, strings.TrimSpace(c.APIKey) != "")
+}
+
+// applyAuth sets either API-key or basic auth. preferKey selects the API key
+// when both are configured; callers that get a 401 with the key can retry with
+// preferKey=false so a verified password still works after a key rotates.
+func (c *PCConfig) applyAuth(req *http.Request, preferKey bool) {
+	req.Header.Del("X-Ntnx-Api-Key")
+	req.Header.Del("Authorization")
+	if preferKey && strings.TrimSpace(c.APIKey) != "" {
 		req.Header.Set("X-Ntnx-Api-Key", c.APIKey)
 		return
 	}
 	if c.User != "" {
 		req.SetBasicAuth(c.User, c.Password)
 	}
+}
+
+// canBasic reports whether a user/password pair is available for a 401 fallback.
+func (c *PCConfig) canBasic() bool {
+	return strings.TrimSpace(c.User) != "" && c.Password != ""
 }
 
 // LoadPCConfig reads PC connection details from the user's Cursor MCP config.
@@ -152,23 +166,35 @@ type nicNet struct {
 }
 
 // pcAPIVersions is the set of Nutanix v4 API minor versions we try, newest
-// first. Different Prism Central releases serve different minors: pc.2024.x
-// commonly tops out at v4.0/v4.1 while newer builds add v4.2. Calling a minor a
-// PC doesn't serve returns 404, so getVersioned walks this list and uses the
-// first that responds — instead of hardcoding v4.2 and silently getting nothing.
-var pcAPIVersions = []string{"v4.2", "v4.1", "v4.0"}
+// first. Different Prism Central releases serve different minors: older
+// pc.2024.x builds top out at v4.0/v4.1 while AOS/PC 7.x commonly exposes
+// v4.2–v4.4 depending on the namespace (e.g. networking often leads). Calling
+// a minor a PC doesn't serve returns 404, so getVersioned walks this list and
+// uses the first that responds — instead of hardcoding one minor and silently
+// getting nothing.
+var pcAPIVersions = []string{"v4.4", "v4.3", "v4.2", "v4.1", "v4.0"}
 
 // getVersioned performs a GET against pathTmpl (which must contain a single %s
 // for the API version), trying each supported minor in turn and returning the
 // body of the first non-404 response. A 404 means "this PC doesn't serve that
 // minor" so we fall through; any other 4xx/5xx (e.g. 401 auth) is returned
-// immediately since retrying another version won't help.
+// immediately since retrying another version won't help — except a 401 with an
+// API key, which we retry once with basic auth when a password is also set.
 func (c *PCClient) getVersioned(pathTmpl string) ([]byte, error) {
+	preferKey := strings.TrimSpace(c.cfg.APIKey) != ""
+	body, err := c.getVersionedAuth(pathTmpl, preferKey)
+	if err != nil && preferKey && c.cfg.canBasic() && strings.Contains(err.Error(), "HTTP 401") {
+		return c.getVersionedAuth(pathTmpl, false)
+	}
+	return body, err
+}
+
+func (c *PCClient) getVersionedAuth(pathTmpl string, preferKey bool) ([]byte, error) {
 	var lastErr error
 	for _, v := range pcAPIVersions {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, c.base+fmt.Sprintf(pathTmpl, v), nil)
-		c.cfg.authHeader(req)
+		c.cfg.applyAuth(req, preferKey)
 		req.Header.Set("Accept", "application/json")
 		resp, err := c.http.Do(req)
 		if err != nil {
@@ -337,10 +363,14 @@ func summarizeVM(r rawVM) VM {
 
 func vmRole(name string) string {
 	n := strings.ToLower(name)
-	if strings.Contains(n, "worker") || strings.Contains(n, "ollama-") {
+	// Keep these prefixes tight: a bare "worker" substring matches unrelated
+	// Prism VMs (e.g. ntnxlab-*-workervmresourceconfig-*), which then leaked
+	// into the managed list. Freely named AIDT workers are identified by pool
+	// membership instead.
+	if strings.HasPrefix(n, "aidt-worker") || strings.HasPrefix(n, "ollama-") {
 		return "worker"
 	}
-	if strings.Contains(n, "gateway") || strings.HasPrefix(n, "olla-") {
+	if strings.HasPrefix(n, "aidt-gateway") || strings.HasPrefix(n, "olla-") {
 		return "gateway"
 	}
 	return "vm"

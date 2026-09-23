@@ -717,21 +717,37 @@ func saveVMImages(path string, m map[string]string) error {
 
 // pcConfigFromOverride builds a PCConfig from an override if it carries enough
 // to connect (host + an API key or user/password). Returns nil otherwise.
+//
+// When the override has a host but neither an API key nor a password, we fill
+// the key from ~/.cursor/mcp.json when present. We deliberately do NOT inject
+// an MCP key on top of a saved password: authHeader prefers the API key, so a
+// stale MCP key would silently override verified password auth and 401 every
+// inventory query.
 func pcConfigFromOverride(o pcOverride) *PCConfig {
 	host := strings.TrimSpace(o.Host)
 	if host == "" {
 		return nil
 	}
-	if strings.TrimSpace(o.APIKey) == "" && strings.TrimSpace(o.User) == "" {
+	apiKey := strings.TrimSpace(o.APIKey)
+	user := strings.TrimSpace(o.User)
+	pass := o.Password
+	if apiKey == "" && user == "" {
 		return nil
+	}
+	if apiKey == "" && strings.TrimSpace(pass) == "" {
+		if mcp := LoadPCConfig(); mcp != nil && strings.TrimSpace(mcp.APIKey) != "" {
+			if mcp.Host == "" || strings.EqualFold(mcp.Host, host) {
+				apiKey = strings.TrimSpace(mcp.APIKey)
+			}
+		}
 	}
 	port := orDefault(strings.TrimSpace(o.Port), "9440")
 	return &PCConfig{
 		Host:     host,
 		Port:     port,
-		APIKey:   strings.TrimSpace(o.APIKey),
-		User:     strings.TrimSpace(o.User),
-		Password: o.Password,
+		APIKey:   apiKey,
+		User:     user,
+		Password: pass,
 	}
 }
 

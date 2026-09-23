@@ -19,6 +19,9 @@ func TestVMRoleRecognizesCurrentAndLegacyNames(t *testing.T) {
 		"aidt-worker-01":   "worker",
 		"olla-gateway-01":  "gateway",
 		"ollama-worker-01": "worker",
+		// Must not treat Nutanix/K8s resource VMs as AIDT workers.
+		"ntnxlab-13ab45-workervmresourceconfig-0": "vm",
+		"some-gateway-appliance":                 "vm",
 	}
 	for name, want := range tests {
 		if got := vmRole(name); got != want {

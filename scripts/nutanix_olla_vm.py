@@ -112,7 +112,7 @@ def save_state(state: dict[str, Any]) -> None:
 # v4.0/v4.1 while newer builds add v4.2. Paths below are written at v4.2 and the
 # client falls back to older minors on a 404, caching the working minor per
 # namespace so we only probe once.
-API_VERSIONS = ("v4.2", "v4.1", "v4.0")
+API_VERSIONS = ("v4.4", "v4.3", "v4.2", "v4.1", "v4.0")
 _NS_VER_RE = re.compile(r"^/([a-z]+)/(v4\.\d+)(?=/|$)")
 
 
@@ -122,12 +122,11 @@ class PrismClient:
         self.base = base_url.rstrip("/")
         self.session = requests.Session()
         self._api_ver: dict[str, str] = {}
-        self.api_key = api_key
-        if api_key:
-            # Prism Central v4 API-key auth (e.g. the key used by the Nutanix MCP).
-            self.session.headers["X-Ntnx-Api-Key"] = api_key
-        else:
-            self.session.auth = HTTPBasicAuth(user or "", password or "")
+        self.api_key = (api_key or "").strip() or None
+        self._user = user or ""
+        self._password = password or ""
+        self._use_key = bool(self.api_key)
+        self._apply_auth()
         self.session.verify = verify
         if not verify:
             try:
@@ -137,6 +136,14 @@ class PrismClient:
             except Exception:
                 pass
 
+    def _apply_auth(self) -> None:
+        self.session.headers.pop("X-Ntnx-Api-Key", None)
+        self.session.auth = None
+        if self._use_key and self.api_key:
+            self.session.headers["X-Ntnx-Api-Key"] = self.api_key
+        elif self._user:
+            self.session.auth = HTTPBasicAuth(self._user, self._password)
+
     def _send(self, method: str, path: str, headers: dict, *,
               body: dict | None = None, params: dict | None = None):
         """Send a request, substituting the v4 minor version in the path and
@@ -145,8 +152,10 @@ class PrismClient:
         probe and a genuine not-found isn't retried needlessly."""
         m = _NS_VER_RE.match(path)
         if not m:
-            return self.session.request(method, f"{self.base}/api{path}",
+            resp = self.session.request(method, f"{self.base}/api{path}",
                                         headers=headers, json=body, params=params, timeout=60)
+            return self._maybe_retry_basic(method, f"/api{path}", headers, resp,
+                                          body=body, params=params, raw=True)
         ns = m.group(1)
         candidates = [self._api_ver[ns]] if ns in self._api_ver else list(API_VERSIONS)
         resp = None
@@ -159,6 +168,18 @@ class PrismClient:
             if resp.status_code != 404:
                 self._api_ver[ns] = ver  # remember the minor this PC actually serves
             break
+        return self._maybe_retry_basic(method, path, headers, resp, body=body, params=params)
+
+    def _maybe_retry_basic(self, method, path, headers, resp, *, body=None, params=None, raw=False):
+        """If an API key got a 401 and a password is available, fall back to basic auth."""
+        if (resp is not None and resp.status_code == 401 and self._use_key
+                and self._user and self._password):
+            self._use_key = False
+            self._apply_auth()
+            if raw:
+                return self.session.request(method, f"{self.base}{path}",
+                                            headers=headers, json=body, params=params, timeout=60)
+            return self._send(method, path, headers, body=body, params=params)
         return resp
 
     def request(self, method: str, path: str, *, body: dict | None = None, params: dict | None = None,

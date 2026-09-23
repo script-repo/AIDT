@@ -2161,26 +2161,30 @@ func (m *model) refreshVMs() {
 	prefixes := m.customVMPrefixes()
 	managed := m.managedHostRoles()
 	m.managedSig = managedSignature(managed)
+	// Once we know the live pool (gateway and/or workers), naming conventions
+	// alone must not keep a retired aidt-worker-* VM in the list. Before the
+	// pool is known we still fall back to name roles so the Nutanix pane is
+	// not empty on a cold start.
+	havePool := len(managed) > 0
 	items := make([]list.Item, 0, len(m.vms))
 	for _, v := range m.vms {
-		role := v.Role
-		if role != "gateway" && role != "worker" {
-			// A VM registered in the pool is managed whatever it is called.
-			// pc.go reports an unknown address as "-", which must never match.
-			poolRole, inPool := "", false
-			if v.IP != "" && v.IP != "-" {
-				poolRole, inPool = managed[v.IP]
-			}
-			switch {
-			case inPool:
-				role = poolRole
-			// Surface user-defined custom-deploy VMs as managed too; skip every
-			// other unrelated VM in Prism Central.
-			case matchesCustomPrefix(v.Name, prefixes):
-				role = "custom"
-			default:
-				continue
-			}
+		poolRole, inPool := "", false
+		if v.IP != "" && v.IP != "-" {
+			poolRole, inPool = managed[v.IP]
+		}
+		var role string
+		switch {
+		case inPool:
+			// Pool membership is authoritative, including freely named workers.
+			role = poolRole
+		case matchesCustomPrefix(v.Name, prefixes):
+			role = "custom"
+		case !havePool && (v.Role == "gateway" || v.Role == "worker"):
+			role = v.Role
+		default:
+			// Name looked like a worker/gateway but it is not in the live pool
+			// (retired), or it is an unrelated Prism VM.
+			continue
 		}
 		items = append(items, vmItem{
 			name: v.Name, role: role, power: v.Power, ip: v.IP,
